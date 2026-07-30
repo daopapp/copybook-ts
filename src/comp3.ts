@@ -1,116 +1,115 @@
 /**
- * COMP-3, decimal empacotado.
+ * COMP-3, packed decimal.
  *
- * Dois dígitos por byte, e o último nibble carrega o sinal. Ler como binário
- * devolve um número errado, não um erro, e é por isso que este módulo falha
- * alto em nibble inválido em vez de normalizar.
+ * Two digits per byte, and the final nibble carries the sign. Reading it as a
+ * binary integer returns a wrong number rather than an error, which is why this
+ * module fails loudly on an invalid nibble instead of normalising it away.
  */
 
-export class ErroComp3 extends Error {}
+export class Comp3Error extends Error {}
 
-/** Nibbles de sinal aceitos na leitura. Alguns compiladores emitem A, B e E. */
-const SINAL_POSITIVO = new Set([0xa, 0xc, 0xe, 0xf]);
-const SINAL_NEGATIVO = new Set([0xb, 0xd]);
+/** Sign nibbles accepted when reading. Some compilers emit A, B and E. */
+const POSITIVE_SIGNS = new Set([0xa, 0xc, 0xe, 0xf]);
+const NEGATIVE_SIGNS = new Set([0xb, 0xd]);
 
 /**
- * Decodifica COMP-3 para string decimal.
+ * Decodes COMP-3 into a decimal string.
  *
- * Devolve string, e não number, de propósito: `PIC S9(16)V99` passa de
- * `Number.MAX_SAFE_INTEGER`, e converter para double perderia centavos em
- * silêncio. Quem chama decide se quer BigInt, Decimal ou aceitar a perda.
+ * Returns a string rather than a number on purpose: `PIC S9(16)V99` exceeds
+ * `Number.MAX_SAFE_INTEGER`, and converting to a double would silently lose
+ * cents. The caller decides between BigInt, a decimal library, or accepting the
+ * loss.
  *
- * @param buf bytes do campo, exatamente do tamanho do campo
- * @param escala casas decimais (o que vem depois do V no PIC)
+ * @param buf the field bytes, exactly the field length
+ * @param scale decimal places, meaning whatever follows the `V` in the PIC
  */
-export function decodeComp3(buf: Uint8Array, escala = 0): string {
-  if (buf.length === 0) throw new ErroComp3('campo COMP-3 vazio');
-  if (escala < 0) throw new ErroComp3(`escala negativa: ${escala}`);
+export function decodeComp3(buf: Uint8Array, scale = 0): string {
+  if (buf.length === 0) throw new Comp3Error('empty COMP-3 field');
+  if (scale < 0) throw new Comp3Error(`negative scale: ${scale}`);
 
   const nibbles: number[] = [];
   for (const byte of buf) {
     nibbles.push((byte >> 4) & 0xf, byte & 0xf);
   }
 
-  const sinal = nibbles.pop()!;
-  let negativo: boolean;
-  if (SINAL_NEGATIVO.has(sinal)) negativo = true;
-  else if (SINAL_POSITIVO.has(sinal)) negativo = false;
+  const sign = nibbles.pop()!;
+  let negative: boolean;
+  if (NEGATIVE_SIGNS.has(sign)) negative = true;
+  else if (POSITIVE_SIGNS.has(sign)) negative = false;
   else {
-    // Nibble de sinal fora do conjunto quase sempre significa que o
-    // deslocamento do campo está errado, não que o dado é exótico.
-    throw new ErroComp3(
-      `nibble de sinal inválido 0x${sinal.toString(16).toUpperCase()}: ` +
-        'provável deslocamento de campo errado',
+    // A sign nibble outside the valid set almost always means the field offset
+    // is wrong, not that the data is exotic.
+    throw new Comp3Error(
+      `invalid sign nibble 0x${sign.toString(16).toUpperCase()}: ` +
+        'the field offset is probably wrong',
     );
   }
 
-  let digitos = '';
+  let digits = '';
   for (const n of nibbles) {
     if (n > 9) {
-      throw new ErroComp3(
-        `nibble de dado inválido 0x${n.toString(16).toUpperCase()}: ` +
-          'provável deslocamento de campo errado',
+      throw new Comp3Error(
+        `invalid data nibble 0x${n.toString(16).toUpperCase()}: ` +
+          'the field offset is probably wrong',
       );
     }
-    digitos += String(n);
+    digits += String(n);
   }
 
-  if (escala > digitos.length) {
-    throw new ErroComp3(`escala ${escala} maior que os ${digitos.length} dígitos do campo`);
+  if (scale > digits.length) {
+    throw new Comp3Error(`scale ${scale} exceeds the ${digits.length} digits in the field`);
   }
 
-  const inteiro = (escala ? digitos.slice(0, digitos.length - escala) : digitos) || '0';
-  const fracao = escala ? digitos.slice(digitos.length - escala) : '';
-  const semZeros = inteiro.replace(/^0+(?=\d)/, '');
-  const corpo = fracao ? `${semZeros}.${fracao}` : semZeros;
+  const whole = (scale ? digits.slice(0, digits.length - scale) : digits) || '0';
+  const fraction = scale ? digits.slice(digits.length - scale) : '';
+  const trimmed = whole.replace(/^0+(?=\d)/, '');
+  const body = fraction ? `${trimmed}.${fraction}` : trimmed;
 
-  // Zero negativo existe em COMP-3 e vale zero. Emitir "-0.00" seria
-  // tecnicamente fiel e praticamente um bug para quem compara strings.
-  const ehZero = /^0(\.0*)?$/.test(corpo);
-  return negativo && !ehZero ? `-${corpo}` : corpo;
+  // Negative zero exists in COMP-3 and means zero. Emitting "-0.00" would be
+  // technically faithful and practically a bug for anyone comparing strings.
+  const isZero = /^0(\.0*)?$/.test(body);
+  return negative && !isZero ? `-${body}` : body;
 }
 
 /**
- * Codifica string decimal em COMP-3.
+ * Encodes a decimal string into COMP-3.
  *
- * Na escrita emitimos só C, D ou F. Ser tolerante na leitura e estrito na
- * escrita evita propagar variação de compilador.
+ * Writing emits only C, D or F. Being lenient when reading and strict when
+ * writing avoids propagating one compiler's quirks into your data.
  */
 export function encodeComp3(
-  valor: string,
-  digitos: number,
-  escala = 0,
-  opcoes: { assinado?: boolean } = {},
+  value: string,
+  digits: number,
+  scale = 0,
+  options: { signed?: boolean } = {},
 ): Uint8Array {
-  const assinado = opcoes.assinado ?? true;
+  const signed = options.signed ?? true;
 
-  const m = /^([+-]?)(\d*)(?:\.(\d*))?$/.exec(valor.trim());
-  if (!m || (!m[2] && !m[3])) throw new ErroComp3(`valor decimal inválido: "${valor}"`);
+  const m = /^([+-]?)(\d*)(?:\.(\d*))?$/.exec(value.trim());
+  if (!m || (!m[2] && !m[3])) throw new Comp3Error(`invalid decimal value: "${value}"`);
 
-  const negativo = m[1] === '-';
-  const inteiro = m[2] ?? '';
-  const fracao = m[3] ?? '';
+  const negative = m[1] === '-';
+  const whole = m[2] ?? '';
+  const fraction = m[3] ?? '';
 
-  if (fracao.length > escala) {
-    throw new ErroComp3(
-      `"${valor}" tem ${fracao.length} casas decimais, o campo aceita ${escala}`,
+  if (fraction.length > scale) {
+    throw new Comp3Error(
+      `"${value}" has ${fraction.length} decimal places, the field accepts ${scale}`,
     );
   }
 
-  const todos = inteiro + fracao.padEnd(escala, '0');
-  const semZeros = todos.replace(/^0+(?=\d)/, '') || '0';
-  if (semZeros.length > digitos) {
-    throw new ErroComp3(
-      `"${valor}" precisa de ${semZeros.length} dígitos, o campo tem ${digitos}`,
-    );
+  const all = whole + fraction.padEnd(scale, '0');
+  const trimmed = all.replace(/^0+(?=\d)/, '') || '0';
+  if (trimmed.length > digits) {
+    throw new Comp3Error(`"${value}" needs ${trimmed.length} digits, the field holds ${digits}`);
   }
-  if (negativo && !assinado) {
-    throw new ErroComp3(`valor negativo em campo sem sinal: "${valor}"`);
+  if (negative && !signed) {
+    throw new Comp3Error(`negative value in an unsigned field: "${value}"`);
   }
 
-  const nib = (semZeros.padStart(digitos, '0') + (assinado ? (negativo ? 'D' : 'C') : 'F')).split(
-    '',
-  );
+  const nib = (
+    trimmed.padStart(digits, '0') + (signed ? (negative ? 'D' : 'C') : 'F')
+  ).split('');
   if (nib.length % 2) nib.unshift('0');
 
   const out = new Uint8Array(nib.length / 2);

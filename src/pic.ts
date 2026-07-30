@@ -1,83 +1,83 @@
 /**
- * Interpretação da cláusula PICTURE do COBOL.
+ * COBOL PICTURE clause interpretation.
  *
- * O ponto central: PIC não descreve um valor, descreve quantos bytes o campo
- * ocupa e como interpretá-los. Errar o tamanho não gera exceção, desloca todos
- * os campos seguintes do registro.
+ * The central point: a PIC clause does not describe a value, it describes how
+ * many bytes a field occupies and how to read them. Getting the size wrong does
+ * not raise, it shifts every field that follows in the record.
  */
 
-/** Como o campo está armazenado em bytes. */
+/** How the field is physically stored. */
 export type Usage =
-  | 'DISPLAY' // um byte por dígito ou caractere
-  | 'COMP-3' // decimal empacotado, dois dígitos por byte
-  | 'BINARY' // inteiro binário big-endian
-  | 'COMP-1' // ponto flutuante 4 bytes
-  | 'COMP-2'; // ponto flutuante 8 bytes
+  | 'DISPLAY' // one byte per digit or character
+  | 'COMP-3' // packed decimal, two digits per byte
+  | 'BINARY' // big-endian integer
+  | 'COMP-1' // 4-byte float
+  | 'COMP-2'; // 8-byte float
 
-export type Categoria = 'alfanumerico' | 'numerico';
+export type Category = 'alphanumeric' | 'numeric';
 
-export interface CampoPic {
+/** Where the sign lives, for a signed DISPLAY field. */
+export type SignPosition = 'trailing' | 'leading' | 'separate-trailing' | 'separate-leading';
+
+export interface PictureField {
   readonly pic: string;
-  readonly categoria: Categoria;
+  readonly category: Category;
   readonly usage: Usage;
-  /** Total de dígitos, incluindo os que ficam depois da vírgula implícita. */
-  readonly digitos: number;
-  /** Casas depois do V. `PIC 9(5)V99` tem escala 2. */
-  readonly escala: number;
-  readonly assinado: boolean;
-  /** Onde o sinal fica, quando assinado e em DISPLAY. */
-  readonly posicaoSinal: 'trailing' | 'leading' | 'separate-trailing' | 'separate-leading';
-  readonly tamanho: number;
+  /** Total digit count, including those after the implied decimal point. */
+  readonly digits: number;
+  /** Digits after the `V`. `PIC 9(5)V99` has a scale of 2. */
+  readonly scale: number;
+  readonly signed: boolean;
+  readonly signPosition: SignPosition;
+  readonly size: number;
 }
 
-export class ErroPic extends Error {}
+export class PicError extends Error {}
 
 /**
- * Expande a notação de repetição do PIC.
+ * Expands PIC repetition notation.
  *
- * `9(3)` -> `999`, `XX` -> `XX`. As duas formas coexistem no mesmo PIC,
- * e `S9(3)V9(2)` é equivalente a `S999V99`.
+ * `9(3)` becomes `999`, `XX` stays `XX`. Both forms coexist in one clause, so
+ * `S9(3)V9(2)` is equivalent to `S999V99`.
  */
-function expandir(corpo: string): string {
-  let saida = '';
+function expand(body: string): string {
+  let out = '';
   let i = 0;
-  while (i < corpo.length) {
-    const ch = corpo[i]!;
-    const abre = corpo[i + 1] === '(';
-    if (!abre) {
-      saida += ch;
+  while (i < body.length) {
+    const ch = body[i]!;
+    if (body[i + 1] !== '(') {
+      out += ch;
       i += 1;
       continue;
     }
-    const fecha = corpo.indexOf(')', i + 2);
-    if (fecha === -1) throw new ErroPic(`parêntese não fechado em "${corpo}"`);
-    const bruto = corpo.slice(i + 2, fecha);
-    if (!/^\d+$/.test(bruto)) throw new ErroPic(`repetição inválida "${bruto}" em "${corpo}"`);
-    const n = Number(bruto);
-    if (n < 1) throw new ErroPic(`repetição precisa ser maior que zero em "${corpo}"`);
-    saida += ch.repeat(n);
-    i = fecha + 1;
+    const close = body.indexOf(')', i + 2);
+    if (close === -1) throw new PicError(`unclosed parenthesis in "${body}"`);
+    const raw = body.slice(i + 2, close);
+    if (!/^\d+$/.test(raw)) throw new PicError(`invalid repetition "${raw}" in "${body}"`);
+    const n = Number(raw);
+    if (n < 1) throw new PicError(`repetition must be greater than zero in "${body}"`);
+    out += ch.repeat(n);
+    i = close + 1;
   }
-  return saida;
+  return out;
 }
 
-/** Bytes de um inteiro BINARY (COMP), pela faixa de dígitos do padrão COBOL. */
-function tamanhoBinario(digitos: number): number {
-  if (digitos <= 4) return 2;
-  if (digitos <= 9) return 4;
-  if (digitos <= 18) return 8;
-  throw new ErroPic(`BINARY com ${digitos} dígitos passa do limite de 18`);
+/** Byte size of a BINARY (COMP) integer, by the standard COBOL digit bands. */
+function binarySize(digits: number): number {
+  if (digits <= 4) return 2;
+  if (digits <= 9) return 4;
+  if (digits <= 18) return 8;
+  throw new PicError(`BINARY with ${digits} digits exceeds the 18 digit limit`);
 }
 
-/** Bytes de um campo COMP-3. O +1 é o nibble de sinal. */
-export function tamanhoComp3(digitos: number): number {
-  return Math.ceil((digitos + 1) / 2);
+/** Byte size of a COMP-3 field. The `+1` is the sign nibble. */
+export function comp3Size(digits: number): number {
+  return Math.ceil((digits + 1) / 2);
 }
 
-function normalizaUsage(bruto: string | undefined): Usage {
-  if (!bruto) return 'DISPLAY';
-  const u = bruto.toUpperCase().replace(/\s+/g, ' ').trim();
-  switch (u) {
+function normaliseUsage(raw: string | undefined): Usage {
+  if (!raw) return 'DISPLAY';
+  switch (raw.toUpperCase().replace(/\s+/g, ' ').trim()) {
     case 'DISPLAY':
       return 'DISPLAY';
     case 'COMP-3':
@@ -98,70 +98,70 @@ function normalizaUsage(bruto: string | undefined): Usage {
     case 'COMPUTATIONAL-2':
       return 'COMP-2';
     default:
-      throw new ErroPic(`USAGE desconhecido: "${bruto}"`);
+      throw new PicError(`unknown USAGE: "${raw}"`);
   }
 }
 
-export interface OpcoesPic {
+export interface PicOptions {
   usage?: string | undefined;
-  /** Cláusula SIGN, quando presente: "LEADING", "TRAILING SEPARATE" etc. */
+  /** SIGN clause when present: "LEADING", "TRAILING SEPARATE" and so on. */
   sign?: string | undefined;
 }
 
 /**
- * Interpreta uma cláusula PIC e devolve o descritor do campo.
+ * Interprets a PIC clause and returns the field descriptor.
  *
- * @param pic corpo do PIC, sem a palavra `PIC`. Ex.: `S9(5)V99`
+ * @param pic the PIC body, without the `PIC` keyword. For example `S9(5)V99`.
  */
-export function parsePic(pic: string, opcoes: OpcoesPic = {}): CampoPic {
-  const bruto = pic.trim().replace(/\.$/, '');
-  if (!bruto) throw new ErroPic('PIC vazio');
+export function parsePic(pic: string, options: PicOptions = {}): PictureField {
+  const raw = pic.trim().replace(/\.$/, '');
+  if (!raw) throw new PicError('empty PIC');
 
-  const usage = normalizaUsage(opcoes.usage);
-  const corpo = expandir(bruto.toUpperCase());
+  const usage = normaliseUsage(options.usage);
+  const body = expand(raw.toUpperCase());
 
-  const assinado = corpo.startsWith('S');
-  const semSinal = assinado ? corpo.slice(1) : corpo;
+  const signed = body.startsWith('S');
+  const unsignedBody = signed ? body.slice(1) : body;
 
-  if (semSinal.includes('S')) throw new ErroPic(`S só pode aparecer no início: "${pic}"`);
+  if (unsignedBody.includes('S')) throw new PicError(`S may only lead the clause: "${pic}"`);
 
-  const alfa = /[XA]/.test(semSinal);
-  const num = /[9VPZ]/.test(semSinal);
+  const isAlpha = /[XA]/.test(unsignedBody);
+  const isNumeric = /[9VPZ]/.test(unsignedBody);
 
-  if (alfa && num) throw new ErroPic(`PIC mistura alfanumérico e numérico: "${pic}"`);
+  if (isAlpha && isNumeric) throw new PicError(`PIC mixes alphanumeric and numeric: "${pic}"`);
 
-  if (alfa) {
-    if (assinado) throw new ErroPic(`S não se aplica a PIC alfanumérico: "${pic}"`);
+  if (isAlpha) {
+    if (signed) throw new PicError(`S does not apply to an alphanumeric PIC: "${pic}"`);
     if (usage !== 'DISPLAY') {
-      throw new ErroPic(`USAGE ${usage} não se aplica a PIC alfanumérico: "${pic}"`);
+      throw new PicError(`USAGE ${usage} does not apply to an alphanumeric PIC: "${pic}"`);
     }
-    const tamanho = semSinal.length;
     return {
-      pic: bruto,
-      categoria: 'alfanumerico',
+      pic: raw,
+      category: 'alphanumeric',
       usage,
-      digitos: 0,
-      escala: 0,
-      assinado: false,
-      posicaoSinal: 'trailing',
-      tamanho,
+      digits: 0,
+      scale: 0,
+      signed: false,
+      signPosition: 'trailing',
+      size: unsignedBody.length,
     };
   }
 
-  if (!num) throw new ErroPic(`PIC sem símbolo reconhecido: "${pic}"`);
+  if (!isNumeric) throw new PicError(`PIC contains no recognised symbol: "${pic}"`);
 
-  const vezes = (semSinal.match(/V/g) ?? []).length;
-  if (vezes > 1) throw new ErroPic(`mais de um V em "${pic}"`);
+  if ((unsignedBody.match(/V/g) ?? []).length > 1) {
+    throw new PicError(`more than one V in "${pic}"`);
+  }
 
-  const idxV = semSinal.indexOf('V');
-  const digitos = (semSinal.match(/9/g) ?? []).length;
-  if (digitos === 0) throw new ErroPic(`PIC numérico sem nenhum 9: "${pic}"`);
-  const escala = idxV === -1 ? 0 : (semSinal.slice(idxV + 1).match(/9/g) ?? []).length;
+  const vIndex = unsignedBody.indexOf('V');
+  const digits = (unsignedBody.match(/9/g) ?? []).length;
+  if (digits === 0) throw new PicError(`numeric PIC with no 9 at all: "${pic}"`);
+  const scale = vIndex === -1 ? 0 : (unsignedBody.slice(vIndex + 1).match(/9/g) ?? []).length;
 
-  const sign = (opcoes.sign ?? '').toUpperCase();
-  const separado = sign.includes('SEPARATE');
+  const sign = (options.sign ?? '').toUpperCase();
+  const separate = sign.includes('SEPARATE');
   const leading = sign.includes('LEADING');
-  const posicaoSinal: CampoPic['posicaoSinal'] = separado
+  const signPosition: SignPosition = separate
     ? leading
       ? 'separate-leading'
       : 'separate-trailing'
@@ -169,40 +169,32 @@ export function parsePic(pic: string, opcoes: OpcoesPic = {}): CampoPic {
       ? 'leading'
       : 'trailing';
 
-  if (sign && !assinado) throw new ErroPic(`cláusula SIGN sem S no PIC: "${pic}"`);
+  if (sign && !signed) throw new PicError(`SIGN clause without S in the PIC: "${pic}"`);
   if (sign && usage !== 'DISPLAY') {
-    throw new ErroPic(`cláusula SIGN só vale para DISPLAY, não ${usage}: "${pic}"`);
+    throw new PicError(`SIGN clause only applies to DISPLAY, not ${usage}: "${pic}"`);
   }
 
-  let tamanho: number;
+  let size: number;
   switch (usage) {
     case 'DISPLAY':
-      // O sinal na zona não gasta byte. SIGN SEPARATE gasta um byte a mais,
-      // e é a exceção que faz o registro deslocar quando ignorada.
-      tamanho = digitos + (assinado && separado ? 1 : 0);
+      // A sign carried in the zone nibble costs no byte. SIGN SEPARATE costs
+      // one extra byte, and that is the exception which shifts the whole
+      // record when it is missed.
+      size = digits + (signed && separate ? 1 : 0);
       break;
     case 'COMP-3':
-      tamanho = tamanhoComp3(digitos);
+      size = comp3Size(digits);
       break;
     case 'BINARY':
-      tamanho = tamanhoBinario(digitos);
+      size = binarySize(digits);
       break;
     case 'COMP-1':
-      tamanho = 4;
+      size = 4;
       break;
     case 'COMP-2':
-      tamanho = 8;
+      size = 8;
       break;
   }
 
-  return {
-    pic: bruto,
-    categoria: 'numerico',
-    usage,
-    digitos,
-    escala,
-    assinado,
-    posicaoSinal,
-    tamanho,
-  };
+  return { pic: raw, category: 'numeric', usage, digits, scale, signed, signPosition, size };
 }

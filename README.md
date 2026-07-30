@@ -1,125 +1,129 @@
 # copybook-ts
 
-Interpreta copybook COBOL e decodifica registro posicional de mainframe em
-TypeScript. COMP-3, EBCDIC, vírgula implícita e sinal na zona tratados como
-regra, não como caso especial.
+Parse COBOL copybooks and decode mainframe fixed-width records in TypeScript.
+Packed decimal, EBCDIC, implied decimal points and zone signs are treated as the
+rule, not as special cases.
 
 [![MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## Por que existe
+## Why this exists
 
-Dado de mainframe não erra com exceção. Erra com um número silenciosamente
-diferente. `PIC S9(5)V99` lido como inteiro devolve `1234567` em vez de
-`12345.67`, e nada reclama. Um campo com o tamanho errado desloca todos os
-campos seguintes, e o registro inteiro decodifica em cascata.
+Mainframe data does not fail with an exception. It fails with a number that is
+quietly different. `PIC S9(5)V99` read as an integer returns `1234567` instead of
+`12345.67`, and nothing complains. A field with the wrong size shifts every
+field after it, and the whole record decodes wrong from that point on.
 
-As bibliotecas que existem em npm resolvem pedaços: conversão de caractere
-EBCDIC, ou parse de um layout específico. Nenhuma vai de copybook a valor
-tipado tratando os casos que realmente aparecem em arquivo de banco e de
-seguradora.
+The libraries on npm solve pieces: EBCDIC character conversion, or a parser for
+one specific layout. None of them go from copybook to typed value while handling
+the cases that actually turn up in bank and insurer files.
 
-## Instalação
+## Install
 
 ```
 npm install copybook-ts
 ```
 
-Node 20 ou mais novo. Nenhuma dependência de produção.
+Node 20 or newer. No runtime dependencies.
 
-## Uso
+## Usage
 
 ```ts
-import { parseCopybook, decodeArquivo } from 'copybook-ts';
+import { parseCopybook, decodeFile } from 'copybook-ts';
 import { readFileSync } from 'node:fs';
 
-const layout = parseCopybook(readFileSync('CLIENTE.cpy', 'utf8'));
-console.log(layout.tamanho); // 35
+const layout = parseCopybook(readFileSync('CUSTOMER.cpy', 'utf8'));
+console.log(layout.size); // 35
 
-for (const reg of decodeArquivo(readFileSync('CLIENTE.DAT'), layout, { encoding: 'cp037' })) {
-  console.log(reg);
-  // { 'CD-CLIENTE': '4711', 'NM-CLIENTE': 'MARIA SILVA         ',
-  //   'VL-SALDO': '12345.67', 'QT-COMPRAS': '42', 'CD-STATUS': '7' }
+for (const record of decodeFile(readFileSync('CUSTOMER.DAT'), layout, { encoding: 'cp037' })) {
+  console.log(record);
+  // { 'CUST-ID': '4711', 'CUST-NAME': 'MARIA SILVA         ',
+  //   BALANCE: '12345.67', 'ORDER-COUNT': '42', 'STATUS-CODE': '7' }
 }
 ```
 
-Campos numéricos voltam como **string**, não `number`. `PIC S9(16)V99` passa de
-`Number.MAX_SAFE_INTEGER`, e converter para double perderia centavos sem avisar.
-Quem chama decide entre `BigInt`, uma biblioteca decimal, ou aceitar a perda.
+Numeric fields come back as **strings**, not numbers. `PIC S9(16)V99` exceeds
+`Number.MAX_SAFE_INTEGER`, and converting to a double would drop cents without
+warning. The caller decides between `BigInt`, a decimal library, or accepting the
+loss.
 
-## O que está tratado
+## What is handled
 
-| Assunto | Estado |
+| Feature | Status |
 |---|---|
-| `PIC X`, `PIC 9`, com e sem `(n)` | sim |
-| Vírgula implícita (`V`) | sim |
-| Sinal na zona (`S`), trailing e leading | sim |
-| `SIGN SEPARATE`, que ocupa um byte a mais | sim |
-| `COMP-3` / `PACKED-DECIMAL` | sim, decodifica e codifica |
-| `COMP` / `COMP-4` / `BINARY`, big-endian com complemento de dois | sim |
-| `COMP-1` e `COMP-2` (float) | sim |
-| Itens de grupo, tamanho pela soma dos filhos | sim |
-| Níveis 66 e 88, que não ocupam espaço | sim |
-| Área de sequência e comentário do formato fixo | sim |
-| EBCDIC página 037 | sim |
-| Record Descriptor Word (`RECFM=VB`) | sim, via `{ rdw: true }` |
-| `REDEFINES` | **recusa com erro** |
-| `OCCURS` e `OCCURS DEPENDING ON` | **recusa com erro** |
-| Páginas EBCDIC além da 037 | não |
+| `PIC X`, `PIC 9`, with and without `(n)` | yes |
+| Implied decimal point (`V`) | yes |
+| Zone sign (`S`), trailing and leading | yes |
+| `SIGN SEPARATE`, which costs one extra byte | yes |
+| `COMP-3` / `PACKED-DECIMAL` | yes, decode and encode |
+| `COMP` / `COMP-4` / `BINARY`, big-endian two's complement | yes |
+| `COMP-1` and `COMP-2` floats | yes |
+| Group items, sized as the sum of their children | yes |
+| Levels 66 and 88, which occupy no space | yes |
+| Fixed-format sequence area and comment indicator | yes |
+| EBCDIC code page 037 | yes |
+| Record Descriptor Word (`RECFM=VB`) | yes, via `{ rdw: true }` |
+| `REDEFINES` | **refuses with an error** |
+| `OCCURS` and `OCCURS DEPENDING ON` | **refuses with an error** |
+| EBCDIC code pages other than 037 | no |
 
-`REDEFINES` e `OCCURS` **falham alto de propósito**. Os dois mudam como o
-deslocamento é calculado. Aceitá-los sem implementar produziria um layout que
-decodifica sem reclamar e devolve valores errados, que é o pior resultado
-possível numa biblioteca como esta.
+`REDEFINES` and `OCCURS` **fail loudly on purpose**. Both change how offsets are
+computed. Accepting them unimplemented would produce a layout that decodes
+without complaint and returns wrong values, which is the worst possible outcome
+for a library like this one.
 
-## Decisões que valem explicar
+## Decisions worth explaining
 
-**Tolerante na leitura, estrito na escrita.** Nibble de sinal `A` e `E` é aceito
-como positivo e `B` como negativo, porque alguns compiladores emitem isso.
-Na escrita só saem `C`, `D` e `F`, para não propagar variação de compilador.
+**Lenient when reading, strict when writing.** Sign nibbles `A` and `E` are
+accepted as positive and `B` as negative, because some compilers emit them.
+Writing only ever emits `C`, `D` and `F`, so one compiler's quirk does not
+propagate into your data.
 
-**Nibble inválido é erro, não valor exótico.** Um nibble de sinal fora de
-`A B C D E F`, ou um nibble de dado maior que 9, quase sempre significa que o
-deslocamento do campo está errado. Normalizar em silêncio esconde o erro e
-propaga pelo registro inteiro.
+**An invalid nibble is an error, not exotic data.** A sign nibble outside
+`A B C D E F`, or a data nibble above 9, almost always means the field offset is
+wrong. Normalising it silently hides the error and spreads it across the record.
 
-**Numérico em display não passa por tabela de caracteres.** O dígito é o nibble
-baixo do byte, o que vale igual em EBCDIC (`0xF1`) e ASCII (`0x31`). Converter o
-byte para texto antes de extrair o dígito é o bug clássico: `0xD3`, que é o
-dígito 3 com sinal negativo, vira a letra `L`. Existe um teste que trava
-exatamente isso.
+**Numeric display fields never touch a character table.** The digit is the low
+nibble of the byte, which holds identically in EBCDIC (`0xF1`) and ASCII
+(`0x31`). Converting the byte to text before extracting the digit is the classic
+bug: `0xD3`, which is digit 3 carrying a negative sign, becomes the letter `L`.
+There is a test that pins exactly this.
 
-**A divisão do arquivo é a validação mais barata que existe.** Se o arquivo não
-é múltiplo do tamanho do registro, o copybook não corresponde ao dado, e isso é
-detectado antes de olhar qualquer valor.
+**Dividing the file is the cheapest validation available.** If the file is not a
+multiple of the record size, the copybook does not match the data, and that is
+caught before looking at a single value.
 
-**A tabela EBCDIC é gerada, não transcrita.** `src/ebcdic.ts` vem do codec
-`cp037` do Python, com autoteste nos pontos que importam (`0xF0` é `0`, há salto
-entre `i` e `j`). 256 bytes escritos à mão envelhecem errado e ninguém confere.
-
-```
-npm run ebcdic    # regenera src/ebcdic.ts
-```
-
-## Desenvolvimento
+**The EBCDIC table is generated, not transcribed.** `src/ebcdic.ts` comes from
+Python's `cp037` codec, with self-checks on the points that matter (`0xF0` is
+`0`, there is a gap between `i` and `j`). Two hundred and fifty six hand-written
+bytes age badly and nobody verifies them.
 
 ```
-npm test          # compila e roda os 30 testes com o runner nativo do Node
+npm run ebcdic    # regenerates src/ebcdic.ts
+```
+
+CI diffs the committed table against a fresh run of the generator, so editing it
+by hand shows up as a failure rather than as silently wrong data.
+
+## Development
+
+```
+npm test          # compiles and runs 30 tests on Node's built-in runner
 npm run typecheck
 ```
 
-Sem framework de teste: `node:test` e `node:assert` bastam, e uma dependência a
-menos numa biblioteca é uma dependência a menos para quem consome.
+No test framework: `node:test` and `node:assert` are enough, and one fewer
+dependency in a library is one fewer dependency for everyone consuming it.
 
-## Roteiro
+## Roadmap
 
-Em ordem de utilidade, não de facilidade:
+In order of usefulness, not of ease:
 
-1. `OCCURS` e `OCCURS DEPENDING ON`, com layout resolvido por registro
-2. `REDEFINES`, expondo as vistas alternativas em vez de escolher uma
-3. Geração de tipos TypeScript a partir do copybook, via CLI
-4. Páginas EBCDIC 1047, 273 e 500
-5. Leitura em stream, para arquivo que não cabe na memória
+1. `OCCURS` and `OCCURS DEPENDING ON`, with the layout resolved per record
+2. `REDEFINES`, exposing the alternative views instead of picking one
+3. TypeScript type generation from a copybook, via a CLI
+4. EBCDIC code pages 1047, 273 and 500
+5. Streaming reads, for files that do not fit in memory
 
-## Licença
+## Licence
 
 MIT

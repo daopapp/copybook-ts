@@ -1,7 +1,7 @@
 {
   "name": "copybook-ts",
   "version": "0.1.0",
-  "description": "Interpreta copybook COBOL e decodifica registro posicional de mainframe: COMP-3, EBCDIC, vírgula implícita e sinal na zona",
+  "description": "Parse COBOL copybooks and decode mainframe fixed-width records in TypeScript: COMP-3, EBCDIC, implied decimal point and zone sign",
   "type": "module",
   "license": "MIT",
   "exports": {
@@ -20,7 +20,7 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "tsc && node --test dist/test/*.test.js",
-    "ebcdic": "python3 tools/gerar-ebcdic.py > src/ebcdic.ts",
+    "ebcdic": "python3 tools/generate-ebcdic.py > src/ebcdic.ts",
     "prepublishOnly": "npm test"
   },
   "keywords": [

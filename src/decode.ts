@@ -1,36 +1,36 @@
 /**
- * Decodificação de registro posicional a partir de um layout.
+ * Record decoding, driven by a parsed layout.
  *
- * Regra que o módulo inteiro respeita: nunca converter o registro inteiro para
- * texto antes de fatiar. Campo COMP-3 e BINARY são binários, não têm
- * codificação, e passá-los por uma tabela de caracteres destrói o valor.
+ * One rule the whole module respects: never convert the record to text before
+ * slicing it. COMP-3 and BINARY fields are binary, they have no encoding, and
+ * running them through a character table destroys the value.
  */
 
 import { decodeComp3 } from './comp3.js';
 import { decodeEbcdic } from './ebcdic.js';
 import type { Item, Layout } from './copybook.js';
 
-export class ErroDecode extends Error {}
+export class DecodeError extends Error {}
 
 export type Encoding = 'cp037' | 'ascii';
 
-export interface OpcoesDecode {
-  /** Codificação dos campos de texto e display. Obrigatória por escolha. */
+export interface DecodeOptions {
+  /** Encoding for text and display fields. Required by choice, never defaulted. */
   encoding: Encoding;
   /**
-   * Se o arquivo tem Record Descriptor Word de 4 bytes por registro (RECFM=VB).
-   * Ignorar o RDW desloca tudo em 4 bytes, e o sintoma é o primeiro campo sair
-   * consistentemente errado.
+   * Whether each record carries a 4-byte Record Descriptor Word (`RECFM=VB`).
+   * Ignoring the RDW shifts everything by 4 bytes, and the symptom is the first
+   * field coming out consistently wrong.
    */
   rdw?: boolean | undefined;
 }
 
-/** Valor decimal fica como string para não perder precisão em campo grande. */
-export type Valor = string | number | null;
+/** Decimal values come back as strings so large fields keep their precision. */
+export type Value = string | number | null;
 
-export type Registro = Record<string, Valor>;
+export type DecodedRecord = Record<string, Value>;
 
-function texto(buf: Uint8Array, enc: Encoding): string {
+function text(buf: Uint8Array, enc: Encoding): string {
   if (enc === 'cp037') return decodeEbcdic(buf);
   let s = '';
   for (const b of buf) s += String.fromCharCode(b);
@@ -38,174 +38,181 @@ function texto(buf: Uint8Array, enc: Encoding): string {
 }
 
 /**
- * Numérico em DISPLAY (zoned decimal).
+ * Zoned decimal, meaning a numeric DISPLAY field.
  *
- * O dígito é sempre o nibble baixo, o que vale em EBCDIC (`0xF1`) e em ASCII
- * (`0x31`). Por isso este caminho não precisa de tabela de caracteres, e por
- * isso ele funciona nas duas codificações sem ramificar.
+ * The digit is always the low nibble, which holds in EBCDIC (`0xF1`) and in
+ * ASCII (`0x31`) alike. That is why this path needs no character table, and why
+ * it works for both encodings without branching.
  *
- * O sinal fica no nibble alto do último byte quando o campo é assinado:
- * `C` positivo, `D` negativo, `F` sem sinal.
+ * When the field is signed, the sign lives in the high nibble of the last byte:
+ * `C` positive, `D` negative, `F` unsigned.
  */
-function displayNumerico(buf: Uint8Array, item: Item): string {
-  const campo = item.campo!;
-  let corpo = buf;
-  let negativoSeparado: boolean | null = null;
+function zonedDecimal(buf: Uint8Array, item: Item): string {
+  const field = item.field!;
+  let body = buf;
+  let separateNegative: boolean | null = null;
 
-  if (campo.assinado && campo.posicaoSinal.startsWith('separate')) {
-    const leading = campo.posicaoSinal === 'separate-leading';
-    const byteSinal = leading ? buf[0]! : buf[buf.length - 1]!;
-    const ch = texto(Uint8Array.of(byteSinal), 'cp037');
-    const chAscii = String.fromCharCode(byteSinal);
-    if (ch === '-' || chAscii === '-') negativoSeparado = true;
-    else if (ch === '+' || chAscii === '+') negativoSeparado = false;
-    else throw new ErroDecode(`${item.nome}: byte de sinal separado inválido 0x${byteSinal.toString(16)}`);
-    corpo = leading ? buf.slice(1) : buf.slice(0, -1);
-  }
-
-  let digitos = '';
-  let negativo = negativoSeparado ?? false;
-
-  for (let i = 0; i < corpo.length; i += 1) {
-    const b = corpo[i]!;
-    const baixo = b & 0x0f;
-    if (baixo > 9) {
-      throw new ErroDecode(
-        `${item.nome}: nibble de dígito inválido 0x${baixo.toString(16)} na posição ${i}: ` +
-          'provável deslocamento de campo errado',
+  if (field.signed && field.signPosition.startsWith('separate')) {
+    const leading = field.signPosition === 'separate-leading';
+    const signByte = leading ? buf[0]! : buf[buf.length - 1]!;
+    const asEbcdic = text(Uint8Array.of(signByte), 'cp037');
+    const asAscii = String.fromCharCode(signByte);
+    if (asEbcdic === '-' || asAscii === '-') separateNegative = true;
+    else if (asEbcdic === '+' || asAscii === '+') separateNegative = false;
+    else {
+      throw new DecodeError(
+        `${item.name}: invalid separate sign byte 0x${signByte.toString(16)}`,
       );
     }
-    digitos += String(baixo);
+    body = leading ? buf.slice(1) : buf.slice(0, -1);
+  }
 
-    const ultimo = i === corpo.length - 1;
-    const primeiro = i === 0;
-    const carregaSinal =
-      campo.assinado &&
-      negativoSeparado === null &&
-      ((campo.posicaoSinal === 'trailing' && ultimo) ||
-        (campo.posicaoSinal === 'leading' && primeiro));
+  let digits = '';
+  let negative = separateNegative ?? false;
 
-    if (carregaSinal) {
-      const alto = (b >> 4) & 0x0f;
-      if (alto === 0xd || alto === 0xb) negativo = true;
-      else if (alto === 0xc || alto === 0xa || alto === 0xe || alto === 0xf) negativo = false;
-      else if (alto === 0x3) negativo = false; // ASCII: '0'-'9' tem zona 0x3
+  for (let i = 0; i < body.length; i += 1) {
+    const b = body[i]!;
+    const low = b & 0x0f;
+    if (low > 9) {
+      throw new DecodeError(
+        `${item.name}: invalid digit nibble 0x${low.toString(16)} at position ${i}: ` +
+          'the field offset is probably wrong',
+      );
+    }
+    digits += String(low);
+
+    const isLast = i === body.length - 1;
+    const isFirst = i === 0;
+    const carriesSign =
+      field.signed &&
+      separateNegative === null &&
+      ((field.signPosition === 'trailing' && isLast) ||
+        (field.signPosition === 'leading' && isFirst));
+
+    if (carriesSign) {
+      const high = (b >> 4) & 0x0f;
+      if (high === 0xd || high === 0xb) negative = true;
+      else if (high === 0xc || high === 0xa || high === 0xe || high === 0xf) negative = false;
+      else if (high === 0x3) negative = false; // ASCII digits carry zone 0x3
       else {
-        throw new ErroDecode(
-          `${item.nome}: zona de sinal inválida 0x${alto.toString(16)} no byte ${i}`,
+        throw new DecodeError(
+          `${item.name}: invalid sign zone 0x${high.toString(16)} at byte ${i}`,
         );
       }
     }
   }
 
-  const escala = campo.escala;
-  if (escala > digitos.length) {
-    throw new ErroDecode(`${item.nome}: escala ${escala} maior que ${digitos.length} dígitos`);
+  const scale = field.scale;
+  if (scale > digits.length) {
+    throw new DecodeError(`${item.name}: scale ${scale} exceeds ${digits.length} digits`);
   }
-  const inteiro = (escala ? digitos.slice(0, digitos.length - escala) : digitos) || '0';
-  const fracao = escala ? digitos.slice(digitos.length - escala) : '';
-  const semZeros = inteiro.replace(/^0+(?=\d)/, '');
-  const corpoStr = fracao ? `${semZeros}.${fracao}` : semZeros;
-  const ehZero = /^0(\.0*)?$/.test(corpoStr);
-  return negativo && !ehZero ? `-${corpoStr}` : corpoStr;
+  const whole = (scale ? digits.slice(0, digits.length - scale) : digits) || '0';
+  const fraction = scale ? digits.slice(digits.length - scale) : '';
+  const trimmed = whole.replace(/^0+(?=\d)/, '');
+  const body2 = fraction ? `${trimmed}.${fraction}` : trimmed;
+  const isZero = /^0(\.0*)?$/.test(body2);
+  return negative && !isZero ? `-${body2}` : body2;
 }
 
-/** BINARY (COMP) é inteiro big-endian com sinal em complemento de dois. */
-function binario(buf: Uint8Array, item: Item): string {
-  const campo = item.campo!;
+/** BINARY (COMP) is a big-endian integer in two's complement. */
+function binary(buf: Uint8Array, item: Item): string {
+  const field = item.field!;
   let v = 0n;
   for (const b of buf) v = (v << 8n) | BigInt(b);
 
-  if (campo.assinado) {
+  if (field.signed) {
     const bits = BigInt(buf.length * 8);
-    const limite = 1n << (bits - 1n);
-    if (v >= limite) v -= 1n << bits;
+    const limit = 1n << (bits - 1n);
+    if (v >= limit) v -= 1n << bits;
   }
 
-  if (campo.escala === 0) return v.toString();
+  if (field.scale === 0) return v.toString();
   const neg = v < 0n;
-  const abs = (neg ? -v : v).toString().padStart(campo.escala + 1, '0');
-  const corte = abs.length - campo.escala;
-  return `${neg ? '-' : ''}${abs.slice(0, corte)}.${abs.slice(corte)}`;
+  const abs = (neg ? -v : v).toString().padStart(field.scale + 1, '0');
+  const cut = abs.length - field.scale;
+  return `${neg ? '-' : ''}${abs.slice(0, cut)}.${abs.slice(cut)}`;
 }
 
-/** Decodifica um único campo elementar. */
-export function decodeCampo(buf: Uint8Array, item: Item, opcoes: OpcoesDecode): Valor {
-  const campo = item.campo;
-  if (!campo) throw new ErroDecode(`${item.nome} não é campo elementar`);
+/** Decodes a single elementary field out of a record buffer. */
+export function decodeField(buf: Uint8Array, item: Item, options: DecodeOptions): Value {
+  const field = item.field;
+  if (!field) throw new DecodeError(`${item.name} is not an elementary field`);
 
-  const fatia = buf.subarray(item.deslocamento, item.deslocamento + item.tamanho);
-  if (fatia.length !== item.tamanho) {
-    throw new ErroDecode(
-      `${item.nome}: esperava ${item.tamanho} bytes no deslocamento ${item.deslocamento}, ` +
-        `só há ${fatia.length}: registro truncado`,
+  const slice = buf.subarray(item.offset, item.offset + item.size);
+  if (slice.length !== item.size) {
+    throw new DecodeError(
+      `${item.name}: expected ${item.size} bytes at offset ${item.offset}, ` +
+        `only ${slice.length} available: truncated record`,
     );
   }
 
-  if (campo.categoria === 'alfanumerico') return texto(fatia, opcoes.encoding);
+  if (field.category === 'alphanumeric') return text(slice, options.encoding);
 
-  switch (campo.usage) {
+  switch (field.usage) {
     case 'DISPLAY':
-      return displayNumerico(fatia, item);
+      return zonedDecimal(slice, item);
     case 'COMP-3':
       try {
-        return decodeComp3(fatia, campo.escala);
+        return decodeComp3(slice, field.scale);
       } catch (e) {
-        throw new ErroDecode(`${item.nome}: ${(e as Error).message}`);
+        throw new DecodeError(`${item.name}: ${(e as Error).message}`);
       }
     case 'BINARY':
-      return binario(fatia, item);
+      return binary(slice, item);
     case 'COMP-1':
-      return new DataView(fatia.buffer, fatia.byteOffset, 4).getFloat32(0, false);
+      return new DataView(slice.buffer, slice.byteOffset, 4).getFloat32(0, false);
     case 'COMP-2':
-      return new DataView(fatia.buffer, fatia.byteOffset, 8).getFloat64(0, false);
+      return new DataView(slice.buffer, slice.byteOffset, 8).getFloat64(0, false);
   }
 }
 
 /**
- * Decodifica um registro completo.
+ * Decodes one complete record.
  *
- * @param buf bytes de exatamente um registro
+ * @param buf bytes of exactly one record
  */
-export function decodeRegistro(buf: Uint8Array, layout: Layout, opcoes: OpcoesDecode): Registro {
-  const corpo = opcoes.rdw ? buf.subarray(4) : buf;
-  if (corpo.length < layout.tamanho) {
-    throw new ErroDecode(
-      `registro tem ${corpo.length} bytes, o layout ${layout.nome} precisa de ${layout.tamanho}`,
+export function decodeRecord(
+  buf: Uint8Array,
+  layout: Layout,
+  options: DecodeOptions,
+): DecodedRecord {
+  const body = options.rdw ? buf.subarray(4) : buf;
+  if (body.length < layout.size) {
+    throw new DecodeError(
+      `record is ${body.length} bytes, layout ${layout.name} requires ${layout.size}`,
     );
   }
 
-  const out: Registro = {};
-  for (const { caminho, item } of layout.campos) {
-    // Nome curto se não colide, caminho completo se colide. Copybook usa o
-    // mesmo nome em ramos diferentes com frequência.
-    const chave = layout.campos.filter((c) => c.item.nome === item.nome).length === 1
-      ? item.nome
-      : caminho;
-    out[chave] = decodeCampo(corpo, item, opcoes);
+  const out: DecodedRecord = {};
+  for (const { path, item } of layout.fields) {
+    // Short name when unique, full path when it collides. Copybooks reuse the
+    // same name across different branches often enough to matter.
+    const key =
+      layout.fields.filter((f) => f.item.name === item.name).length === 1 ? item.name : path;
+    out[key] = decodeField(body, item, options);
   }
   return out;
 }
 
 /**
- * Divide um arquivo de registros de tamanho fixo e decodifica cada um.
+ * Splits a fixed-length record file and decodes each record.
  *
- * A divisão é a checagem mais barata de layout errado que existe: se o arquivo
- * não é múltiplo do tamanho do registro, o copybook não corresponde ao dado.
+ * The division is the cheapest wrong-layout check that exists: if the file is
+ * not a multiple of the record size, the copybook does not match the data.
  */
-export function* decodeArquivo(
+export function* decodeFile(
   buf: Uint8Array,
   layout: Layout,
-  opcoes: OpcoesDecode,
-): Generator<Registro> {
-  const passo = layout.tamanho + (opcoes.rdw ? 4 : 0);
-  if (buf.length % passo !== 0) {
-    throw new ErroDecode(
-      `arquivo tem ${buf.length} bytes, que não é múltiplo de ${passo}. ` +
-        'O copybook não corresponde ao dado, ou falta tratar o RDW.',
+  options: DecodeOptions,
+): Generator<DecodedRecord> {
+  const step = layout.size + (options.rdw ? 4 : 0);
+  if (buf.length % step !== 0) {
+    throw new DecodeError(
+      `file is ${buf.length} bytes, which is not a multiple of ${step}. ` +
+        'Either the copybook does not match the data, or the RDW is unhandled.',
     );
   }
-  for (let i = 0; i < buf.length; i += passo) {
-    yield decodeRegistro(buf.subarray(i, i + passo), layout, opcoes);
+  for (let i = 0; i < buf.length; i += step) {
+    yield decodeRecord(buf.subarray(i, i + step), layout, options);
   }
 }

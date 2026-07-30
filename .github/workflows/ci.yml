@@ -18,7 +18,7 @@ jobs:
       - run: npm ci
       - run: npm test
 
-  ebcdic-reproduzivel:
+  ebcdic-reproducible:
     # A tabela em src/ebcdic.ts e' gerada. Se alguem editar a mao, o diff
     # aparece aqui em vez de virar dado errado silencioso.
     runs-on: ubuntu-latest
@@ -27,5 +27,5 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python3 tools/gerar-ebcdic.py > /tmp/ebcdic.ts
+      - run: python3 tools/generate-ebcdic.py > /tmp/ebcdic.ts
       - run: diff -u src/ebcdic.ts /tmp/ebcdic.ts

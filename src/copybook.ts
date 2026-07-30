@@ -1,223 +1,221 @@
 /**
- * Copybook COBOL para árvore de layout com deslocamentos.
+ * COBOL copybook into a layout tree with byte offsets.
  *
- * Ordem de trabalho, e a ordem importa:
- *   1. montar a árvore de níveis sem calcular nada
- *   2. calcular tamanho de baixo para cima
- *   3. calcular deslocamento de cima para baixo
+ * The order of work matters:
+ *   1. build the level tree, computing nothing
+ *   2. compute sizes bottom up
+ *   3. compute offsets top down
  *
- * Inverter os passos 2 e 3 produz deslocamento errado em qualquer item de
- * grupo, porque o tamanho do grupo é a soma dos filhos.
+ * Swapping steps 2 and 3 produces wrong offsets for every group item, because a
+ * group's size is the sum of its children.
  */
 
-import { parsePic, type CampoPic } from './pic.js';
+import { parsePic, type PictureField } from './pic.js';
 
-export class ErroCopybook extends Error {}
+export class CopybookError extends Error {}
 
 export interface Item {
-  readonly nivel: number;
-  readonly nome: string;
-  /** Presente só em item elementar. Item de grupo não tem PIC. */
-  readonly campo?: CampoPic | undefined;
-  readonly filhos: Item[];
-  /** Deslocamento em bytes desde o início do registro. */
-  deslocamento: number;
-  tamanho: number;
+  readonly level: number;
+  readonly name: string;
+  /** Present only on elementary items. A group item has no PIC. */
+  readonly field?: PictureField | undefined;
+  readonly children: Item[];
+  /** Byte offset from the start of the record. */
+  offset: number;
+  size: number;
 }
 
 export interface Layout {
-  readonly nome: string;
-  readonly tamanho: number;
-  readonly raiz: Item;
-  /** Todos os itens elementares, achatados, na ordem física. */
-  readonly campos: ReadonlyArray<{ caminho: string; item: Item }>;
+  readonly name: string;
+  readonly size: number;
+  readonly root: Item;
+  /** Every elementary item, flattened, in physical order. */
+  readonly fields: ReadonlyArray<{ path: string; item: Item }>;
 }
 
 /**
- * Níveis que não ocupam byte:
- *   66 = RENAMES, apelido para um intervalo já existente
- *   88 = condição nomeada (VALUE), não é campo
- * Contá-los infla o tamanho do registro.
+ * Levels that occupy no bytes:
+ *   66 = RENAMES, an alias over an existing range
+ *   88 = condition name (VALUE), not a field
+ * Counting them inflates the record size.
  */
-const NIVEIS_SEM_ESPACO = new Set([66, 88]);
+const ZERO_WIDTH_LEVELS = new Set([66, 88]);
 
-interface Sentenca {
-  readonly texto: string;
-  readonly linha: number;
+interface Sentence {
+  readonly text: string;
+  readonly line: number;
 }
 
 /**
- * Quebra o copybook em sentenças terminadas por ponto.
+ * Splits the copybook into period-terminated sentences.
  *
- * Trata a área de sequência (colunas 1 a 6) e o indicador de comentário na
- * coluna 7, que aparecem em copybook exportado direto do mainframe.
+ * Handles the sequence area (columns 1 to 6) and the comment indicator in
+ * column 7, both of which appear in copybooks exported straight off a mainframe.
  */
-function sentencas(fonte: string): Sentenca[] {
-  const out: Sentenca[] = [];
+function sentences(source: string): Sentence[] {
+  const out: Sentence[] = [];
   let acc = '';
-  let inicio = 0;
+  let start = 0;
 
-  fonte.split(/\r?\n/).forEach((bruta, idx) => {
-    let linha = bruta;
+  source.split(/\r?\n/).forEach((rawLine, idx) => {
+    let line = rawLine;
 
-    // Formato fixo: 1 a 6 sequência, 7 indicador, 8 a 72 código. Só descarta
-    // se a coluna 7 for indicador de verdade, senão um copybook em formato
-    // livre teria os 7 primeiros caracteres do nome comidos.
-    if (linha.length > 7 && /^[\d ]{6}[*\-/ ]/.test(linha)) {
-      const indicador = linha[6];
-      if (indicador === '*' || indicador === '/') return; // comentário
-      linha = linha.slice(7, 72);
+    // Fixed format: 1 to 6 sequence, 7 indicator, 8 to 72 code. Only strip when
+    // column 7 really is an indicator, otherwise a free-format copybook would
+    // lose the first seven characters of its names.
+    if (line.length > 7 && /^[\d ]{6}[*\-/ ]/.test(line)) {
+      const indicator = line[6];
+      if (indicator === '*' || indicator === '/') return; // comment line
+      line = line.slice(7, 72);
     }
 
-    const semComentario = linha.replace(/^\s*\*.*$/, '');
-    const t = semComentario.trim();
-    if (!t) return;
+    const text = line.replace(/^\s*\*.*$/, '').trim();
+    if (!text) return;
 
-    if (!acc) inicio = idx + 1;
-    acc += (acc ? ' ' : '') + t;
+    if (!acc) start = idx + 1;
+    acc += (acc ? ' ' : '') + text;
 
     if (acc.endsWith('.')) {
-      out.push({ texto: acc.slice(0, -1).trim(), linha: inicio });
+      out.push({ text: acc.slice(0, -1).trim(), line: start });
       acc = '';
     }
   });
 
   if (acc.trim()) {
-    throw new ErroCopybook(`sentença sem ponto final, começando na linha ${inicio}`);
+    throw new CopybookError(`sentence with no terminating period, starting at line ${start}`);
   }
   return out;
 }
 
-interface Declaracao {
-  nivel: number;
-  nome: string;
+interface Declaration {
+  level: number;
+  name: string;
   pic?: string | undefined;
   usage?: string | undefined;
   sign?: string | undefined;
-  linha: number;
+  line: number;
 }
 
-function declara(s: Sentenca): Declaracao | null {
-  const m = /^(\d{2})\s+(\S+)(.*)$/.exec(s.texto);
-  if (!m) throw new ErroCopybook(`linha ${s.linha}: não reconheci "${s.texto}"`);
+function declare(s: Sentence): Declaration | null {
+  const m = /^(\d{2})\s+(\S+)(.*)$/.exec(s.text);
+  if (!m) throw new CopybookError(`line ${s.line}: could not parse "${s.text}"`);
 
-  const nivel = Number(m[1]);
-  const nome = m[2]!.toUpperCase();
-  const resto = m[3] ?? '';
+  const level = Number(m[1]);
+  const name = m[2]!.toUpperCase();
+  const rest = m[3] ?? '';
 
-  if (NIVEIS_SEM_ESPACO.has(nivel)) return null;
+  if (ZERO_WIDTH_LEVELS.has(level)) return null;
 
-  // Falhar alto é deliberado. REDEFINES e OCCURS mudam como o deslocamento é
-  // calculado; aceitá-los sem implementar produziria um layout errado que
-  // decodifica sem reclamar, que é o pior resultado possível aqui.
-  if (/\bREDEFINES\b/i.test(resto)) {
-    throw new ErroCopybook(
-      `linha ${s.linha}: REDEFINES ainda não é suportado. ` +
-        'Ele é união sobre a mesma memória e exige decidir a interpretação fora do copybook.',
+  // Failing loudly is deliberate. REDEFINES and OCCURS change how offsets are
+  // computed; accepting them unimplemented would produce a wrong layout that
+  // decodes without complaint, which is the worst possible outcome here.
+  if (/\bREDEFINES\b/i.test(rest)) {
+    throw new CopybookError(
+      `line ${s.line}: REDEFINES is not supported yet. ` +
+        'It is a union over the same memory and requires choosing an interpretation ' +
+        'that the copybook itself does not record.',
     );
   }
-  if (/\bOCCURS\b/i.test(resto)) {
-    throw new ErroCopybook(
-      `linha ${s.linha}: OCCURS ainda não é suportado. ` +
-        'Com DEPENDING ON o registro tem tamanho variável e o layout precisa ser resolvido por registro.',
+  if (/\bOCCURS\b/i.test(rest)) {
+    throw new CopybookError(
+      `line ${s.line}: OCCURS is not supported yet. ` +
+        'With DEPENDING ON the record is variable length, so the layout has to be ' +
+        'resolved per record rather than once per copybook.',
     );
   }
 
-  const pic = /\bPIC(?:TURE)?\s+(?:IS\s+)?(\S+)/i.exec(resto)?.[1];
-  const usage = /\b(?:USAGE\s+(?:IS\s+)?)?(COMP(?:UTATIONAL)?(?:-[12345])?|PACKED-DECIMAL|BINARY|DISPLAY)\b/i.exec(
-    resto,
-  )?.[1];
-  const sign = /\bSIGN\s+(?:IS\s+)?((?:LEADING|TRAILING)(?:\s+SEPARATE(?:\s+CHARACTER)?)?)/i.exec(
-    resto,
-  )?.[1];
+  const pic = /\bPIC(?:TURE)?\s+(?:IS\s+)?(\S+)/i.exec(rest)?.[1];
+  const usage =
+    /\b(?:USAGE\s+(?:IS\s+)?)?(COMP(?:UTATIONAL)?(?:-[12345])?|PACKED-DECIMAL|BINARY|DISPLAY)\b/i.exec(
+      rest,
+    )?.[1];
+  const sign =
+    /\bSIGN\s+(?:IS\s+)?((?:LEADING|TRAILING)(?:\s+SEPARATE(?:\s+CHARACTER)?)?)/i.exec(rest)?.[1];
 
-  return { nivel, nome, pic, usage, sign, linha: s.linha };
+  return { level, name, pic, usage, sign, line: s.line };
 }
 
-/** Passo 1: árvore de níveis, sem calcular tamanho nem deslocamento. */
-function arvore(decls: Declaracao[]): Item {
-  if (!decls.length) throw new ErroCopybook('copybook sem nenhuma declaração');
+/** Step 1: the level tree, with no sizes and no offsets yet. */
+function buildTree(decls: Declaration[]): Item {
+  if (!decls.length) throw new CopybookError('copybook contains no declarations');
 
-  const raizDecl = decls[0]!;
-  if (raizDecl.nivel !== 1 && raizDecl.nivel !== 77) {
-    throw new ErroCopybook(
-      `linha ${raizDecl.linha}: esperava nível 01 ou 77 no início, achei ${String(raizDecl.nivel).padStart(2, '0')}`,
+  const rootDecl = decls[0]!;
+  if (rootDecl.level !== 1 && rootDecl.level !== 77) {
+    throw new CopybookError(
+      `line ${rootDecl.line}: expected level 01 or 77 to open the copybook, found ` +
+        String(rootDecl.level).padStart(2, '0'),
     );
   }
 
-  const cria = (d: Declaracao): Item => ({
-    nivel: d.nivel,
-    nome: d.nome,
-    campo: d.pic ? parsePic(d.pic, { usage: d.usage, sign: d.sign }) : undefined,
-    filhos: [],
-    deslocamento: 0,
-    tamanho: 0,
+  const make = (d: Declaration): Item => ({
+    level: d.level,
+    name: d.name,
+    field: d.pic ? parsePic(d.pic, { usage: d.usage, sign: d.sign }) : undefined,
+    children: [],
+    offset: 0,
+    size: 0,
   });
 
-  const raiz = cria(raizDecl);
-  const pilha: Item[] = [raiz];
+  const root = make(rootDecl);
+  const stack: Item[] = [root];
 
   for (const d of decls.slice(1)) {
-    while (pilha.length > 1 && d.nivel <= pilha[pilha.length - 1]!.nivel) pilha.pop();
-    const pai = pilha[pilha.length - 1]!;
-    if (d.nivel <= pai.nivel) {
-      throw new ErroCopybook(`linha ${d.linha}: nível ${d.nivel} não encaixa sob ${pai.nome}`);
+    while (stack.length > 1 && d.level <= stack[stack.length - 1]!.level) stack.pop();
+    const parent = stack[stack.length - 1]!;
+    if (d.level <= parent.level) {
+      throw new CopybookError(`line ${d.line}: level ${d.level} does not nest under ${parent.name}`);
     }
-    const item = cria(d);
-    pai.filhos.push(item);
-    pilha.push(item);
+    const item = make(d);
+    parent.children.push(item);
+    stack.push(item);
   }
-  return raiz;
+  return root;
 }
 
-/** Passo 2: tamanho de baixo para cima. Grupo é a soma dos filhos. */
-function calculaTamanho(item: Item): number {
-  if (item.filhos.length === 0) {
-    if (!item.campo) {
-      throw new ErroCopybook(`${item.nome} não tem PIC nem filhos: não sei o tamanho dele`);
+/** Step 2: sizes bottom up. A group is the sum of its children. */
+function computeSizes(item: Item): number {
+  if (item.children.length === 0) {
+    if (!item.field) {
+      throw new CopybookError(`${item.name} has neither a PIC nor children, so it has no size`);
     }
-    item.tamanho = item.campo.tamanho;
-    return item.tamanho;
+    item.size = item.field.size;
+    return item.size;
   }
-  if (item.campo) {
-    throw new ErroCopybook(`${item.nome} tem PIC e filhos ao mesmo tempo`);
+  if (item.field) {
+    throw new CopybookError(`${item.name} has both a PIC and children`);
   }
-  item.tamanho = item.filhos.reduce((soma, f) => soma + calculaTamanho(f), 0);
-  return item.tamanho;
+  item.size = item.children.reduce((sum, c) => sum + computeSizes(c), 0);
+  return item.size;
 }
 
-/** Passo 3: deslocamento de cima para baixo. */
-function calculaDeslocamento(item: Item, base: number): void {
-  item.deslocamento = base;
+/** Step 3: offsets top down. */
+function computeOffsets(item: Item, base: number): void {
+  item.offset = base;
   let cursor = base;
-  for (const f of item.filhos) {
-    calculaDeslocamento(f, cursor);
-    cursor += f.tamanho;
+  for (const c of item.children) {
+    computeOffsets(c, cursor);
+    cursor += c.size;
   }
 }
 
-function achata(
-  item: Item,
-  prefixo: string,
-  saida: Array<{ caminho: string; item: Item }>,
-): void {
-  const caminho = prefixo ? `${prefixo}.${item.nome}` : item.nome;
-  if (item.filhos.length === 0) saida.push({ caminho, item });
-  else for (const f of item.filhos) achata(f, caminho, saida);
+function flatten(item: Item, prefix: string, out: Array<{ path: string; item: Item }>): void {
+  const path = prefix ? `${prefix}.${item.name}` : item.name;
+  if (item.children.length === 0) out.push({ path, item });
+  else for (const c of item.children) flatten(c, path, out);
 }
 
-/** Interpreta um copybook e devolve o layout com tamanhos e deslocamentos. */
-export function parseCopybook(fonte: string): Layout {
-  const decls = sentencas(fonte)
-    .map(declara)
-    .filter((d): d is Declaracao => d !== null);
+/** Parses a copybook and returns the layout with sizes and offsets resolved. */
+export function parseCopybook(source: string): Layout {
+  const decls = sentences(source)
+    .map(declare)
+    .filter((d): d is Declaration => d !== null);
 
-  const raiz = arvore(decls);
-  calculaTamanho(raiz);
-  calculaDeslocamento(raiz, 0);
+  const root = buildTree(decls);
+  computeSizes(root);
+  computeOffsets(root, 0);
 
-  const campos: Array<{ caminho: string; item: Item }> = [];
-  achata(raiz, '', campos);
+  const fields: Array<{ path: string; item: Item }> = [];
+  flatten(root, '', fields);
 
-  return { nome: raiz.nome, tamanho: raiz.tamanho, raiz, campos };
+  return { name: root.name, size: root.size, root, fields };
 }

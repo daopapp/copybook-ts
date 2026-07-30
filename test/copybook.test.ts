@@ -1,114 +1,130 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseCopybook, ErroCopybook } from '../src/copybook.js';
-import { decodeRegistro, decodeArquivo, ErroDecode } from '../src/decode.js';
+import { parseCopybook, CopybookError } from '../src/copybook.js';
+import { decodeRecord, decodeFile, DecodeError } from '../src/decode.js';
 import { encodeComp3 } from '../src/comp3.js';
 import { encodeEbcdic } from '../src/ebcdic.js';
 
-const CLIENTE = `
-      * Cadastro de cliente, layout de exemplo
-       01  CLIENTE.
-           05  CD-CLIENTE      PIC 9(5).
-           05  NM-CLIENTE      PIC X(20).
-           05  VL-SALDO        PIC S9(7)V99 COMP-3.
-           05  QT-COMPRAS      PIC S9(4) COMP.
-           05  CD-STATUS       PIC S9(3).
+const CUSTOMER = `
+      * Customer master record, sample layout
+       01  CUSTOMER.
+           05  CUST-ID         PIC 9(5).
+           05  CUST-NAME       PIC X(20).
+           05  BALANCE         PIC S9(7)V99 COMP-3.
+           05  ORDER-COUNT     PIC S9(4) COMP.
+           05  STATUS-CODE     PIC S9(3).
 `;
 
-test('calcula tamanho e deslocamento na ordem certa', () => {
-  const l = parseCopybook(CLIENTE);
-  assert.equal(l.nome, 'CLIENTE');
+test('computes sizes and offsets in the right order', () => {
+  const l = parseCopybook(CUSTOMER);
+  assert.equal(l.name, 'CUSTOMER');
   assert.deepEqual(
-    l.campos.map((c) => [c.item.nome, c.item.deslocamento, c.item.tamanho]),
+    l.fields.map((f) => [f.item.name, f.item.offset, f.item.size]),
     [
-      ['CD-CLIENTE', 0, 5],
-      ['NM-CLIENTE', 5, 20],
-      ['VL-SALDO', 25, 5], // 9 dígitos -> ceil(10/2) = 5
-      ['QT-COMPRAS', 30, 2], // 4 dígitos em COMP -> 2 bytes
-      ['CD-STATUS', 32, 3], // sinal na zona, não gasta byte
+      ['CUST-ID', 0, 5],
+      ['CUST-NAME', 5, 20],
+      ['BALANCE', 25, 5], // 9 digits -> ceil(10/2) = 5
+      ['ORDER-COUNT', 30, 2], // 4 digits in COMP -> 2 bytes
+      ['STATUS-CODE', 32, 3], // zone sign, no extra byte
     ],
   );
-  assert.equal(l.tamanho, 35);
+  assert.equal(l.size, 35);
 });
 
-test('item de grupo é a soma dos filhos, e não é contado duas vezes', () => {
+test('a group item is the sum of its children and is not counted twice', () => {
   const l = parseCopybook(`
-       01  REG.
-           05  CAB.
-               10  TP        PIC X.
-               10  DT        PIC 9(8).
-           05  CORPO.
+       01  REC.
+           05  HEADER.
+               10  KIND      PIC X.
+               10  STAMP     PIC 9(8).
+           05  BODY.
                10  A         PIC X(10).
                10  B         PIC X(10).
   `);
-  assert.equal(l.tamanho, 29, '1 + 8 + 10 + 10');
-  assert.equal(l.raiz.filhos[0]!.tamanho, 9, 'CAB');
-  assert.equal(l.raiz.filhos[1]!.deslocamento, 9, 'CORPO começa depois de CAB');
-  assert.equal(l.campos.length, 4, 'só os elementares aparecem achatados');
+  assert.equal(l.size, 29, '1 + 8 + 10 + 10');
+  assert.equal(l.root.children[0]!.size, 9, 'HEADER');
+  assert.equal(l.root.children[1]!.offset, 9, 'BODY starts after HEADER');
+  assert.equal(l.fields.length, 4, 'only elementary items are flattened');
 });
 
-test('níveis 66 e 88 não ocupam espaço', () => {
+test('levels 66 and 88 occupy no space', () => {
   const l = parseCopybook(`
-       01  REG.
+       01  REC.
            05  ST            PIC X.
-               88  ATIVO     VALUE 'A'.
-               88  INATIVO   VALUE 'I'.
-           05  NOME          PIC X(10).
+               88  ACTIVE    VALUE 'A'.
+               88  INACTIVE  VALUE 'I'.
+           05  NAME          PIC X(10).
   `);
-  assert.equal(l.tamanho, 11, '88 não é campo');
-  assert.equal(l.campos.length, 2);
+  assert.equal(l.size, 11, '88 is not a field');
+  assert.equal(l.fields.length, 2);
 });
 
-test('ignora comentário e área de sequência do formato fixo', () => {
+test('ignores comments and the fixed-format sequence area', () => {
   const l = parseCopybook(
-    '000100* comentario com numero de sequencia\n' +
-      '000200 01  REG.\n' +
+    '000100* comment line carrying a sequence number\n' +
+      '000200 01  REC.\n' +
       '000300     05  A  PIC X(3).\n',
   );
-  assert.equal(l.tamanho, 3);
-  assert.equal(l.campos[0]!.item.nome, 'A');
+  assert.equal(l.size, 3);
+  assert.equal(l.fields[0]!.item.name, 'A');
 });
 
-test('rejeita REDEFINES e OCCURS em vez de calcular deslocamento errado', () => {
-  // Aceitar sem implementar produziria um layout que decodifica sem reclamar,
-  // devolvendo valores errados. Falhar alto é o comportamento correto.
+test('rejects REDEFINES and OCCURS rather than computing a wrong offset', () => {
+  // Accepting them unimplemented would produce a layout that decodes without
+  // complaint and returns wrong values. Failing loudly is the correct behaviour.
   assert.throws(
-    () => parseCopybook('       01  R.\n           05  A PIC X(4).\n           05  B REDEFINES A PIC 9(4).\n'),
-    ErroCopybook,
+    () =>
+      parseCopybook(
+        '       01  R.\n           05  A PIC X(4).\n           05  B REDEFINES A PIC 9(4).\n',
+      ),
+    CopybookError,
   );
   assert.throws(
-    () => parseCopybook('       01  R.\n           05  N PIC 9(2).\n           05  I OCCURS 1 TO 5 DEPENDING ON N PIC X.\n'),
-    ErroCopybook,
+    () =>
+      parseCopybook(
+        '       01  R.\n           05  N PIC 9(2).\n           05  I OCCURS 1 TO 5 DEPENDING ON N PIC X.\n',
+      ),
+    CopybookError,
   );
 });
 
-test('rejeita copybook malformado', () => {
-  assert.throws(() => parseCopybook(''), ErroCopybook, 'vazio');
-  assert.throws(() => parseCopybook('       05  A PIC X.\n'), ErroCopybook, 'não começa em 01');
-  assert.throws(() => parseCopybook('       01  R.\n           05  G.\n'), ErroCopybook, 'grupo sem filho');
+test('rejects a malformed copybook', () => {
+  assert.throws(() => parseCopybook(''), CopybookError, 'empty');
+  assert.throws(() => parseCopybook('       05  A PIC X.\n'), CopybookError, 'does not open at 01');
+  assert.throws(
+    () => parseCopybook('       01  R.\n           05  G.\n'),
+    CopybookError,
+    'group with no children',
+  );
   assert.throws(
     () => parseCopybook('       01  R.\n           05  A PIC X(3) \n'),
-    ErroCopybook,
-    'sentença sem ponto',
+    CopybookError,
+    'sentence with no period',
   );
 });
 
 // ---------------------------------------------------------------------------
-// Ponta a ponta: monta um registro EBCDIC real e decodifica.
+// End to end: build a real EBCDIC record and decode it.
 // ---------------------------------------------------------------------------
 
-function registroCliente(cd: string, nome: string, saldo: string, qt: number, status: number) {
-  const layout = parseCopybook(CLIENTE);
-  const buf = new Uint8Array(layout.tamanho);
+function customerRecord(
+  id: string,
+  name: string,
+  balance: string,
+  orders: number,
+  status: number,
+) {
+  const layout = parseCopybook(CUSTOMER);
+  const buf = new Uint8Array(layout.size);
 
-  buf.set(encodeEbcdic(cd.padStart(5, '0')), 0);
-  buf.set(encodeEbcdic(nome.padEnd(20, ' ')), 5);
-  buf.set(encodeComp3(saldo, 9, 2), 25);
+  buf.set(encodeEbcdic(id.padStart(5, '0')), 0);
+  buf.set(encodeEbcdic(name.padEnd(20, ' ')), 5);
+  buf.set(encodeComp3(balance, 9, 2), 25);
 
-  // COMP: big-endian, complemento de dois
-  new DataView(buf.buffer).setInt16(30, qt, false);
+  // COMP: big-endian, two's complement
+  new DataView(buf.buffer).setInt16(30, orders, false);
 
-  // DISPLAY assinado: dígitos com zona F, sinal no nibble alto do último byte
+  // Signed DISPLAY: digits carry zone F, the sign rides the last byte's high nibble
   const d = String(Math.abs(status)).padStart(3, '0');
   buf[32] = 0xf0 | Number(d[0]);
   buf[33] = 0xf0 | Number(d[1]);
@@ -117,80 +133,79 @@ function registroCliente(cd: string, nome: string, saldo: string, qt: number, st
   return { layout, buf };
 }
 
-test('decodifica registro EBCDIC de ponta a ponta', () => {
-  const { layout, buf } = registroCliente('4711', 'MARIA SILVA', '12345.67', 42, 7);
-  const r = decodeRegistro(buf, layout, { encoding: 'cp037' });
+test('decodes an EBCDIC record end to end', () => {
+  const { layout, buf } = customerRecord('4711', 'MARIA SILVA', '12345.67', 42, 7);
+  const r = decodeRecord(buf, layout, { encoding: 'cp037' });
 
-  assert.equal(r['CD-CLIENTE'], '4711');
-  assert.equal(r['NM-CLIENTE'], 'MARIA SILVA         ');
-  assert.equal(r['VL-SALDO'], '12345.67');
-  assert.equal(r['QT-COMPRAS'], '42');
-  assert.equal(r['CD-STATUS'], '7');
+  assert.equal(r['CUST-ID'], '4711');
+  assert.equal(r['CUST-NAME'], 'MARIA SILVA         ');
+  assert.equal(r['BALANCE'], '12345.67');
+  assert.equal(r['ORDER-COUNT'], '42');
+  assert.equal(r['STATUS-CODE'], '7');
 });
 
-test('valor negativo funciona em COMP-3, COMP e DISPLAY', () => {
-  const { layout, buf } = registroCliente('1', 'X', '-99.50', -7, -3);
-  const r = decodeRegistro(buf, layout, { encoding: 'cp037' });
-  assert.equal(r['VL-SALDO'], '-99.50', 'COMP-3 com nibble D');
-  assert.equal(r['QT-COMPRAS'], '-7', 'COMP em complemento de dois');
-  assert.equal(r['CD-STATUS'], '-3', 'DISPLAY com zona de sinal D');
+test('negative values work in COMP-3, COMP and DISPLAY alike', () => {
+  const { layout, buf } = customerRecord('1', 'X', '-99.50', -7, -3);
+  const r = decodeRecord(buf, layout, { encoding: 'cp037' });
+  assert.equal(r['BALANCE'], '-99.50', 'COMP-3 with a D nibble');
+  assert.equal(r['ORDER-COUNT'], '-7', "COMP in two's complement");
+  assert.equal(r['STATUS-CODE'], '-3', 'DISPLAY with a D sign zone');
 });
 
-test('a zona de sinal é o bug que este teste existe para travar', () => {
-  // 0xD3 decodificado como texto EBCDIC devolve 'L', não '3'. Se alguém
-  // reescrever o caminho de DISPLAY passando por tabela de caracteres, este
-  // teste quebra.
-  const { layout, buf } = registroCliente('1', 'X', '0', 0, -123);
-  const r = decodeRegistro(buf, layout, { encoding: 'cp037' });
-  assert.equal(r['CD-STATUS'], '-123');
-  assert.equal(buf[34], 0xd3, 'último byte tem zona D e dígito 3');
+test('the sign zone is the bug this test exists to pin down', () => {
+  // 0xD3 decoded as EBCDIC text yields 'L', not '3'. If anyone rewrites the
+  // DISPLAY path to go through a character table, this test breaks.
+  const { layout, buf } = customerRecord('1', 'X', '0', 0, -123);
+  const r = decodeRecord(buf, layout, { encoding: 'cp037' });
+  assert.equal(r['STATUS-CODE'], '-123');
+  assert.equal(buf[34], 0xd3, 'last byte carries zone D and digit 3');
 });
 
-test('registro truncado falha em vez de devolver campo vazio', () => {
-  const { layout, buf } = registroCliente('1', 'X', '1', 1, 1);
-  assert.throws(() => decodeRegistro(buf.subarray(0, 30), layout, { encoding: 'cp037' }), ErroDecode);
-});
-
-test('arquivo que não é múltiplo do registro falha na divisão', () => {
-  // A checagem mais barata de layout errado que existe.
-  const { layout, buf } = registroCliente('1', 'X', '1', 1, 1);
-  const doisEMeio = new Uint8Array(layout.tamanho * 2 + 7);
-  doisEMeio.set(buf, 0);
+test('a truncated record fails instead of yielding an empty field', () => {
+  const { layout, buf } = customerRecord('1', 'X', '1', 1, 1);
   assert.throws(
-    () => [...decodeArquivo(doisEMeio, layout, { encoding: 'cp037' })],
-    ErroDecode,
+    () => decodeRecord(buf.subarray(0, 30), layout, { encoding: 'cp037' }),
+    DecodeError,
   );
 });
 
-test('divide arquivo de múltiplos registros', () => {
-  const a = registroCliente('1', 'ANA', '10.00', 1, 1);
-  const bb = registroCliente('2', 'BOB', '20.00', 2, 2);
-  const arquivo = new Uint8Array(a.buf.length * 2);
-  arquivo.set(a.buf, 0);
-  arquivo.set(bb.buf, a.buf.length);
-
-  const regs = [...decodeArquivo(arquivo, a.layout, { encoding: 'cp037' })];
-  assert.equal(regs.length, 2);
-  assert.equal(regs[0]!['NM-CLIENTE'], 'ANA                 ');
-  assert.equal(regs[1]!['VL-SALDO'], '20.00');
+test('a file that is not a multiple of the record size fails on division', () => {
+  // The cheapest wrong-layout check there is.
+  const { layout, buf } = customerRecord('1', 'X', '1', 1, 1);
+  const twoAndAHalf = new Uint8Array(layout.size * 2 + 7);
+  twoAndAHalf.set(buf, 0);
+  assert.throws(() => [...decodeFile(twoAndAHalf, layout, { encoding: 'cp037' })], DecodeError);
 });
 
-test('RDW desloca 4 bytes, e ignorá-lo é o erro clássico', () => {
-  const { layout, buf } = registroCliente('4711', 'MARIA', '1.00', 1, 1);
-  const comRdw = new Uint8Array(4 + buf.length);
-  new DataView(comRdw.buffer).setUint16(0, comRdw.length, false);
-  comRdw.set(buf, 4);
+test('splits a multi-record file', () => {
+  const a = customerRecord('1', 'ANA', '10.00', 1, 1);
+  const bb = customerRecord('2', 'BOB', '20.00', 2, 2);
+  const file = new Uint8Array(a.buf.length * 2);
+  file.set(a.buf, 0);
+  file.set(bb.buf, a.buf.length);
 
-  const certo = decodeRegistro(comRdw, layout, { encoding: 'cp037', rdw: true });
-  assert.equal(certo['CD-CLIENTE'], '4711');
+  const records = [...decodeFile(file, a.layout, { encoding: 'cp037' })];
+  assert.equal(records.length, 2);
+  assert.equal(records[0]!['CUST-NAME'], 'ANA                 ');
+  assert.equal(records[1]!['BALANCE'], '20.00');
+});
 
-  // Sem tratar o RDW, o primeiro campo sai errado ou estoura. Qualquer um dos
-  // dois é aceitável aqui: o que não pode é devolver 4711.
-  let resultado: string | null = null;
+test('the RDW shifts by 4 bytes, and ignoring it is the classic error', () => {
+  const { layout, buf } = customerRecord('4711', 'MARIA', '1.00', 1, 1);
+  const withRdw = new Uint8Array(4 + buf.length);
+  new DataView(withRdw.buffer).setUint16(0, withRdw.length, false);
+  withRdw.set(buf, 4);
+
+  const correct = decodeRecord(withRdw, layout, { encoding: 'cp037', rdw: true });
+  assert.equal(correct['CUST-ID'], '4711');
+
+  // Without handling the RDW the first field comes out wrong or throws. Either
+  // is acceptable here. What is not acceptable is returning 4711.
+  let result: string | null = null;
   try {
-    resultado = String(decodeRegistro(comRdw, layout, { encoding: 'cp037' })['CD-CLIENTE']);
+    result = String(decodeRecord(withRdw, layout, { encoding: 'cp037' })['CUST-ID']);
   } catch {
-    resultado = 'estourou';
+    result = 'threw';
   }
-  assert.notEqual(resultado, '4711', 'ignorar o RDW não pode dar o valor certo por acidente');
+  assert.notEqual(result, '4711', 'ignoring the RDW must not accidentally give the right value');
 });
