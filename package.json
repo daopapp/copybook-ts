@@ -1,0 +1,41 @@
+{
+  "name": "copybook-ts",
+  "version": "0.1.0",
+  "description": "Interpreta copybook COBOL e decodifica registro posicional de mainframe: COMP-3, EBCDIC, vírgula implícita e sinal na zona",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc && node --test dist/test/",
+    "ebcdic": "python3 tools/gerar-ebcdic.py > src/ebcdic.ts",
+    "prepublishOnly": "npm test"
+  },
+  "keywords": [
+    "cobol",
+    "copybook",
+    "mainframe",
+    "ebcdic",
+    "comp-3",
+    "packed-decimal",
+    "zos",
+    "fixed-width",
+    "legacy"
+  ],
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "typescript": "^5.6.0"
+  }
+}

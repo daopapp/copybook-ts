@@ -1,0 +1,31 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ['20', '22', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci
+      - run: npm test
+
+  ebcdic-reproduzivel:
+    # A tabela em src/ebcdic.ts e' gerada. Se alguem editar a mao, o diff
+    # aparece aqui em vez de virar dado errado silencioso.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 tools/gerar-ebcdic.py > /tmp/ebcdic.ts
+      - run: diff -u src/ebcdic.ts /tmp/ebcdic.ts
