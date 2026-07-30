@@ -19,7 +19,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && node --test dist/test/",
+    "test": "tsc && node --test dist/test/*.test.js",
     "ebcdic": "python3 tools/gerar-ebcdic.py > src/ebcdic.ts",
     "prepublishOnly": "npm test"
   },
