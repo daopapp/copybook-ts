@@ -204,6 +204,19 @@ function flatten(item: Item, prefix: string, out: Array<{ path: string; item: It
   else for (const c of item.children) flatten(c, path, out);
 }
 
+/**
+ * Wraps an item tree that already carries sizes and offsets into a layout.
+ *
+ * Generated modules use this to rebuild the layout from a frozen tree, so the
+ * flattening rule lives in one place instead of being duplicated by the code
+ * generator.
+ */
+export function layoutFrom(root: Item): Layout {
+  const fields: Array<{ path: string; item: Item }> = [];
+  flatten(root, '', fields);
+  return { name: root.name, size: root.size, root, fields };
+}
+
 /** Parses a copybook and returns the layout with sizes and offsets resolved. */
 export function parseCopybook(source: string): Layout {
   const decls = sentences(source)
@@ -214,8 +227,5 @@ export function parseCopybook(source: string): Layout {
   computeSizes(root);
   computeOffsets(root, 0);
 
-  const fields: Array<{ path: string; item: Item }> = [];
-  flatten(root, '', fields);
-
-  return { name: root.name, size: root.size, root, fields };
+  return layoutFrom(root);
 }

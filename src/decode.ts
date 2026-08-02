@@ -167,6 +167,24 @@ export function decodeField(buf: Uint8Array, item: Item, options: DecodeOptions)
 }
 
 /**
+ * The key each field takes in a decoded record: short name when unique, full
+ * path when it collides. Copybooks reuse the same name across different
+ * branches often enough to matter.
+ *
+ * Exported because the type generator has to produce exactly these keys. A
+ * second copy of the rule would drift, and the symptom would be a type that
+ * names a property the decoder never sets.
+ */
+// ponytail: quadratic in field count, fine for the hundreds of fields a
+// copybook holds. Group by name if a record ever has thousands.
+export function fieldKeys(layout: Layout): Array<{ key: string; item: Item }> {
+  return layout.fields.map(({ path, item }) => ({
+    key: layout.fields.filter((f) => f.item.name === item.name).length === 1 ? item.name : path,
+    item,
+  }));
+}
+
+/**
  * Decodes one complete record.
  *
  * @param buf bytes of exactly one record
@@ -184,11 +202,7 @@ export function decodeRecord(
   }
 
   const out: DecodedRecord = {};
-  for (const { path, item } of layout.fields) {
-    // Short name when unique, full path when it collides. Copybooks reuse the
-    // same name across different branches often enough to matter.
-    const key =
-      layout.fields.filter((f) => f.item.name === item.name).length === 1 ? item.name : path;
+  for (const { key, item } of fieldKeys(layout)) {
     out[key] = decodeField(body, item, options);
   }
   return out;

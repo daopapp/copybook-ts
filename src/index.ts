@@ -5,8 +5,11 @@ export { decodeComp3, encodeComp3, Comp3Error } from './comp3.js';
 
 export { decodeEbcdic, encodeEbcdic, CP037 } from './ebcdic.js';
 
-export { parseCopybook, CopybookError } from './copybook.js';
+export { parseCopybook, layoutFrom, CopybookError } from './copybook.js';
 export type { Layout, Item } from './copybook.js';
 
-export { decodeField, decodeRecord, decodeFile, DecodeError } from './decode.js';
+export { generateModule } from './codegen.js';
+export type { GenerateOptions } from './codegen.js';
+
+export { decodeField, decodeRecord, decodeFile, fieldKeys, DecodeError } from './decode.js';
 export type { DecodeOptions, DecodedRecord, Value, Encoding } from './decode.js';

@@ -46,6 +46,35 @@ Numeric fields come back as **strings**, not numbers. `PIC S9(16)V99` exceeds
 warning. The caller decides between `BigInt`, a decimal library, or accepting the
 loss.
 
+## Typed records from a copybook
+
+The decoder returns `string | number | null` for every field, which forces a
+cast at each call site. The generator resolves the layout once, at build time,
+and writes a module where each field carries the type its PIC clause actually
+produces.
+
+```
+npx copybook-types CUSTOMER.cpy > src/generated/customer.ts
+```
+
+```ts
+import { decodeCustomerFile } from './generated/customer.js';
+
+for (const record of decodeCustomerFile(bytes, { encoding: 'cp037' })) {
+  record['CUST-ID'];  // string
+  record.RATE;        // number, because COMP-1 is a float
+  record.BLANCE;      // compile error
+}
+```
+
+Field names stay exactly as the copybook spells them, hyphens included, and
+match the keys the decoder sets: short name when unique, full path when the
+name repeats across branches. There is no rename table to fall out of sync.
+
+The layout is frozen into the generated file, so the `.cpy` is a build input
+and does not ship. A copybook that stops parsing breaks the build instead of
+breaking overnight against a file that just arrived.
+
 ## What is handled
 
 | Feature | Status |
@@ -107,9 +136,13 @@ by hand shows up as a failure rather than as silently wrong data.
 ## Development
 
 ```
-npm test          # compiles and runs 30 tests on Node's built-in runner
+npm test          # compiles and runs 38 tests on Node's built-in runner
 npm run typecheck
 ```
+
+`test/fixtures/customer.generated.ts` is committed generated output. A test
+regenerates it and diffs, so a change in the generator that nobody meant shows
+up as a failure. Regenerate with `npm run codegen:fixture`.
 
 No test framework: `node:test` and `node:assert` are enough, and one fewer
 dependency in a library is one fewer dependency for everyone consuming it.
@@ -120,9 +153,8 @@ In order of usefulness, not of ease:
 
 1. `OCCURS` and `OCCURS DEPENDING ON`, with the layout resolved per record
 2. `REDEFINES`, exposing the alternative views instead of picking one
-3. TypeScript type generation from a copybook, via a CLI
-4. EBCDIC code pages 1047, 273 and 500
-5. Streaming reads, for files that do not fit in memory
+3. EBCDIC code pages 1047, 273 and 500
+4. Streaming reads, for files that do not fit in memory
 
 ## Licence
 
