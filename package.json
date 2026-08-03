@@ -14,8 +14,14 @@
     "copybook-types": "./dist/src/cli.js"
   },
   "files": [
-    "dist"
+    "dist/src"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/daopapp/copybook-ts.git"
+  },
+  "homepage": "https://github.com/daopapp/copybook-ts#readme",
+  "bugs": "https://github.com/daopapp/copybook-ts/issues",
   "engines": {
     "node": ">=20"
   },
