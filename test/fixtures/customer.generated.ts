@@ -11,6 +11,7 @@ export interface CustomerMaster {
   BALANCE: string;
   'ORDER-COUNT': string;
   RATE: number;
+  CODES: string[];
   'CUSTOMER-MASTER.BILLING.ADDRESS-LINE': string;
   'CUSTOMER-MASTER.SHIPPING.ADDRESS-LINE': string;
 }
@@ -19,7 +20,7 @@ const root: Item = {
   level: 1,
   name: 'CUSTOMER-MASTER',
   offset: 0,
-  size: 56,
+  size: 62,
   children: [
     {
       level: 5,
@@ -63,15 +64,24 @@ const root: Item = {
     },
     {
       level: 5,
-      name: 'BILLING',
+      name: 'CODES',
+      field: { pic: 'X(2)', category: 'alphanumeric', usage: 'DISPLAY', digits: 0, scale: 0, signed: false, signPosition: 'trailing', size: 2 },
+      occurs: { min: 3, max: 3 },
       offset: 36,
+      size: 2,
+      children: [],
+    },
+    {
+      level: 5,
+      name: 'BILLING',
+      offset: 42,
       size: 10,
       children: [
         {
           level: 10,
           name: 'ADDRESS-LINE',
           field: { pic: 'X(10)', category: 'alphanumeric', usage: 'DISPLAY', digits: 0, scale: 0, signed: false, signPosition: 'trailing', size: 10 },
-          offset: 36,
+          offset: 42,
           size: 10,
           children: [],
         },
@@ -80,14 +90,14 @@ const root: Item = {
     {
       level: 5,
       name: 'SHIPPING',
-      offset: 46,
+      offset: 52,
       size: 10,
       children: [
         {
           level: 10,
           name: 'ADDRESS-LINE',
           field: { pic: 'X(10)', category: 'alphanumeric', usage: 'DISPLAY', digits: 0, scale: 0, signed: false, signPosition: 'trailing', size: 10 },
-          offset: 46,
+          offset: 52,
           size: 10,
           children: [],
         },
@@ -96,7 +106,7 @@ const root: Item = {
   ],
 };
 
-/** 56 bytes per record. */
+/** 62 bytes per record. */
 export const CUSTOMER_MASTER_LAYOUT: Layout = layoutFrom(root);
 
 /** Decodes exactly one record. */
@@ -104,7 +114,7 @@ export function decodeCustomerMaster(buf: Uint8Array, options: DecodeOptions): C
   return decodeRecord(buf, CUSTOMER_MASTER_LAYOUT, options) as unknown as CustomerMaster;
 }
 
-/** Decodes every record in a fixed-length file. */
+/** Decodes every record in the file. */
 export function* decodeCustomerMasterFile(
   buf: Uint8Array,
   options: DecodeOptions,

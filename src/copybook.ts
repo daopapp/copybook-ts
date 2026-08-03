@@ -14,22 +14,63 @@ import { parsePic, type PictureField } from './pic.js';
 
 export class CopybookError extends Error {}
 
+/**
+ * An `OCCURS` clause, meaning the item is a table.
+ *
+ * `min` and `max` are equal for a fixed table. They differ only with
+ * `DEPENDING ON`, where the actual count lives in another field of the same
+ * record and is known only when that record is read.
+ */
+export interface Occurs {
+  readonly min: number;
+  readonly max: number;
+  /** Name of the field holding the count, for `OCCURS DEPENDING ON`. */
+  readonly dependingOn?: string | undefined;
+}
+
 export interface Item {
   readonly level: number;
   readonly name: string;
   /** Present only on elementary items. A group item has no PIC. */
   readonly field?: PictureField | undefined;
+  /** Present only on a table. */
+  readonly occurs?: Occurs | undefined;
   readonly children: Item[];
-  /** Byte offset from the start of the record. */
+  /**
+   * Byte offset from the start of the record, exact only when the layout is
+   * not `variable`. On a table this is the offset of the first occurrence.
+   *
+   * The decoder never reads this: it walks the tree with a cursor, because with
+   * `DEPENDING ON` every offset after the table moves per record. The field is
+   * kept because it is what a person reading a layout wants to see.
+   */
   offset: number;
+  /**
+   * Bytes of a **single** occurrence. The whole table is this times the count,
+   * which is what `totalSize` returns.
+   */
   size: number;
+}
+
+/** Bytes an item occupies in the record, counting every occurrence. */
+export function totalSize(item: Item): number {
+  return item.size * (item.occurs ? item.occurs.max : 1);
 }
 
 export interface Layout {
   readonly name: string;
+  /** Record size in bytes. The **maximum** when `variable` is true. */
   readonly size: number;
+  /**
+   * True when some table has `DEPENDING ON`, so the record length varies and
+   * a file of these records cannot be split by division.
+   */
+  readonly variable: boolean;
   readonly root: Item;
-  /** Every elementary item, flattened, in physical order. */
+  /**
+   * Every elementary item, flattened, in physical order. One entry per
+   * declaration, not per occurrence: a table of 10 appears once.
+   */
   readonly fields: ReadonlyArray<{ path: string; item: Item }>;
 }
 
@@ -93,6 +134,7 @@ interface Declaration {
   pic?: string | undefined;
   usage?: string | undefined;
   sign?: string | undefined;
+  occurs?: Occurs | undefined;
   line: number;
 }
 
@@ -116,13 +158,7 @@ function declare(s: Sentence): Declaration | null {
         'that the copybook itself does not record.',
     );
   }
-  if (/\bOCCURS\b/i.test(rest)) {
-    throw new CopybookError(
-      `line ${s.line}: OCCURS is not supported yet. ` +
-        'With DEPENDING ON the record is variable length, so the layout has to be ' +
-        'resolved per record rather than once per copybook.',
-    );
-  }
+  const occurs = parseOccurs(rest, s.line);
 
   const pic = /\bPIC(?:TURE)?\s+(?:IS\s+)?(\S+)/i.exec(rest)?.[1];
   const usage =
@@ -132,7 +168,35 @@ function declare(s: Sentence): Declaration | null {
   const sign =
     /\bSIGN\s+(?:IS\s+)?((?:LEADING|TRAILING)(?:\s+SEPARATE(?:\s+CHARACTER)?)?)/i.exec(rest)?.[1];
 
-  return { level, name, pic, usage, sign, line: s.line };
+  return { level, name, pic, usage, sign, occurs, line: s.line };
+}
+
+/**
+ * Reads the `OCCURS` clause.
+ *
+ * Accepts `OCCURS 5`, `OCCURS 5 TIMES`, `OCCURS 1 TO 5 TIMES DEPENDING ON N`
+ * and the form without `TO`, which some copybooks use even for `DEPENDING ON`.
+ * Trailing clauses such as `INDEXED BY` and `ASCENDING KEY` are ignored: they
+ * describe access, not layout, so they cost no bytes.
+ */
+function parseOccurs(rest: string, line: number): Occurs | undefined {
+  if (!/\bOCCURS\b/i.test(rest)) return undefined;
+
+  const m = /\bOCCURS\s+(?:(\d+)\s+TO\s+)?(\d+)\b(?:\s+TIMES\b)?/i.exec(rest);
+  if (!m) throw new CopybookError(`line ${line}: could not read the OCCURS clause in "${rest.trim()}"`);
+
+  const max = Number(m[2]);
+  if (max < 1) throw new CopybookError(`line ${line}: OCCURS ${max} is not a table`);
+
+  const dependingOn = /\bDEPENDING\s+(?:ON\s+)?([A-Za-z0-9-]+)/i.exec(rest)?.[1]?.toUpperCase();
+  // Without DEPENDING ON the table is fixed, so min and max coincide. The
+  // "n TO m" form without DEPENDING ON is still fixed at m in practice: nothing
+  // in the record says otherwise.
+  const min = dependingOn ? Number(m[1] ?? 0) : max;
+
+  if (min > max) throw new CopybookError(`line ${line}: OCCURS ${min} TO ${max} has min above max`);
+
+  return dependingOn ? { min, max, dependingOn } : { min, max };
 }
 
 /** Step 1: the level tree, with no sizes and no offsets yet. */
@@ -151,6 +215,7 @@ function buildTree(decls: Declaration[]): Item {
     level: d.level,
     name: d.name,
     field: d.pic ? parsePic(d.pic, { usage: d.usage, sign: d.sign }) : undefined,
+    occurs: d.occurs,
     children: [],
     offset: 0,
     size: 0,
@@ -172,29 +237,85 @@ function buildTree(decls: Declaration[]): Item {
   return root;
 }
 
-/** Step 2: sizes bottom up. A group is the sum of its children. */
+/**
+ * Step 2: sizes bottom up. A group is the sum of its children.
+ *
+ * `item.size` holds one occurrence and the return value holds the whole table,
+ * which is what a parent has to add up. Conflating the two is how a table of
+ * ten ends up sized as one and shifts every field after it.
+ */
 function computeSizes(item: Item): number {
   if (item.children.length === 0) {
     if (!item.field) {
       throw new CopybookError(`${item.name} has neither a PIC nor children, so it has no size`);
     }
     item.size = item.field.size;
-    return item.size;
+    return totalSize(item);
   }
   if (item.field) {
     throw new CopybookError(`${item.name} has both a PIC and children`);
   }
   item.size = item.children.reduce((sum, c) => sum + computeSizes(c), 0);
-  return item.size;
+  return totalSize(item);
 }
 
-/** Step 3: offsets top down. */
+/** Step 3: offsets top down. Inside a table these describe occurrence one. */
 function computeOffsets(item: Item, base: number): void {
   item.offset = base;
   let cursor = base;
   for (const c of item.children) {
     computeOffsets(c, cursor);
-    cursor += c.size;
+    cursor += totalSize(c);
+  }
+}
+
+function anyDependingOn(item: Item): boolean {
+  return Boolean(item.occurs?.dependingOn) || item.children.some(anyDependingOn);
+}
+
+/**
+ * Checks that every `DEPENDING ON` names a numeric field declared before the
+ * table and outside it.
+ *
+ * COBOL requires this and so does any decoder: the count has to be readable
+ * before the table it sizes. Catching it here turns a copybook mistake into a
+ * parse error instead of a record that decodes to the wrong length.
+ */
+function validateDependingOn(fields: ReadonlyArray<{ path: string; item: Item }>, root: Item): void {
+  const tables: Array<{ path: string; item: Item }> = [];
+  const walk = (item: Item, prefix: string) => {
+    const path = prefix ? `${prefix}.${item.name}` : item.name;
+    if (item.occurs?.dependingOn) tables.push({ path, item });
+    for (const c of item.children) walk(c, path);
+  };
+  walk(root, '');
+
+  for (const { path, item } of tables) {
+    const name = item.occurs!.dependingOn!;
+    const counter = fields.find((f) => f.item.name === name);
+    if (!counter) {
+      throw new CopybookError(
+        `${item.name}: OCCURS DEPENDING ON ${name}, but no field named ${name} exists`,
+      );
+    }
+    if (counter.item.field?.category !== 'numeric') {
+      throw new CopybookError(
+        `${item.name}: OCCURS DEPENDING ON ${name}, which is not a numeric field`,
+      );
+    }
+    if (counter.path.startsWith(`${path}.`)) {
+      throw new CopybookError(
+        `${item.name}: OCCURS DEPENDING ON ${name}, which is inside the table it sizes`,
+      );
+    }
+    const first = fields.findIndex((f) => f.path.startsWith(`${path}.`) || f.path === path);
+    const at = fields.indexOf(counter);
+    if (first !== -1 && at > first) {
+      throw new CopybookError(
+        `${item.name}: OCCURS DEPENDING ON ${name}, which is declared after the table. ` +
+          'The count has to be readable before the table it sizes.',
+      );
+    }
   }
 }
 
@@ -214,7 +335,7 @@ function flatten(item: Item, prefix: string, out: Array<{ path: string; item: It
 export function layoutFrom(root: Item): Layout {
   const fields: Array<{ path: string; item: Item }> = [];
   flatten(root, '', fields);
-  return { name: root.name, size: root.size, root, fields };
+  return { name: root.name, size: totalSize(root), variable: anyDependingOn(root), root, fields };
 }
 
 /** Parses a copybook and returns the layout with sizes and offsets resolved. */
@@ -227,5 +348,7 @@ export function parseCopybook(source: string): Layout {
   computeSizes(root);
   computeOffsets(root, 0);
 
-  return layoutFrom(root);
+  const layout = layoutFrom(root);
+  validateDependingOn(layout.fields, root);
+  return layout;
 }

@@ -28,6 +28,18 @@ test('the committed fixture matches a fresh run of the generator', () => {
   );
 });
 
+test('the committed variable fixture matches a fresh run too', () => {
+  const fresh = generateModule(readFileSync(fixture('order.cpy'), 'utf8'), {
+    importFrom: '../../src/index.js',
+    sourceName: 'order.cpy',
+  });
+  assert.equal(
+    fresh,
+    readFileSync(fixture('order.generated.ts'), 'utf8'),
+    'regenerate with: npm run codegen:fixture',
+  );
+});
+
 test('float usages type as number, everything else as string', () => {
   const out = generateModule(COPYBOOK);
   assert.match(out, /^ {2}RATE: number;$/m); // COMP-1
@@ -49,9 +61,11 @@ test('a duplicated field name types under its full path, exactly as decodeRecord
  * type at all, because it type-checks.
  */
 test('the generated interface names exactly the keys the decoder produces', () => {
-  const declared = [
-    ...generateModule(COPYBOOK).matchAll(/^ {2}'?([^':]+)'?: (?:string|number);$/gm),
-  ].map((m) => m[1]);
+  // Only the top level: two spaces of indentation. Anything deeper belongs to a
+  // table element, which is a scope of its own.
+  const declared = [...generateModule(COPYBOOK).matchAll(/^ {2}'([^']+)'?: |^ {2}([A-Z][\w-]*): /gm)].map(
+    (m) => m[1] ?? m[2],
+  );
   assert.deepEqual(Object.keys(decodeCustomerMaster(record(), { encoding: 'ascii' })), declared);
 });
 
@@ -65,8 +79,9 @@ function record(): Uint8Array {
   buf.set(encodeComp3('12345.67', 9, 2), 25);
   new DataView(buf.buffer).setInt16(30, 7, false);
   new DataView(buf.buffer).setFloat32(32, 1.5, false);
-  ascii('RUA A 100 ', 36);
-  ascii('RUA B 200 ', 46);
+  ascii('AABBCC', 36); // CODES, three occurrences of two bytes
+  ascii('RUA A 100 ', 42);
+  ascii('RUA B 200 ', 52);
   return buf;
 }
 
@@ -77,6 +92,7 @@ test('the frozen layout decodes the same values the parsed one would', () => {
   assert.equal(decoded.BALANCE, '12345.67');
   assert.equal(decoded['ORDER-COUNT'], '7');
   assert.equal(decoded.RATE, 1.5);
+  assert.deepEqual(decoded.CODES, ['AA', 'BB', 'CC']);
   assert.equal(decoded['CUSTOMER-MASTER.BILLING.ADDRESS-LINE'], 'RUA A 100 ');
   assert.equal(decoded['CUSTOMER-MASTER.SHIPPING.ADDRESS-LINE'], 'RUA B 200 ');
 });
@@ -93,9 +109,22 @@ test('the file decoder walks every record', () => {
 
 test('a copybook the parser refuses never reaches generation', () => {
   assert.throws(
-    () => generateModule('       01  REC.\n           05  ITEMS OCCURS 5 TIMES PIC X(3).\n'),
+    () => generateModule('       01  REC.\n           05  B REDEFINES A PIC 9(4).\n'),
     CopybookError,
   );
+});
+
+test('a table types as an array, and DEPENDING ON says so in the size comment', () => {
+  const fixed = generateModule('       01  REC.\n           05  ITEMS OCCURS 5 TIMES PIC X(3).\n');
+  assert.match(fixed, /^ {2}ITEMS: string\[\];$/m);
+  assert.match(fixed, /15 bytes per record/);
+
+  const variable = generateModule(
+    '       01  REC.\n           05  N PIC 9.\n           05  I OCCURS 1 TO 4 DEPENDING ON N PIC X.\n',
+  );
+  assert.match(variable, /^ {2}I: string\[\];$/m);
+  assert.match(variable, /Up to 5 bytes per record/);
+  assert.match(variable, /occurs: \{ min: 1, max: 4, dependingOn: 'N' \}/);
 });
 
 test('a name opening with a digit still yields a valid identifier', () => {

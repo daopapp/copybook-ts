@@ -28,7 +28,10 @@ export interface DecodeOptions {
 /** Decimal values come back as strings so large fields keep their precision. */
 export type Value = string | number | null;
 
-export type DecodedRecord = Record<string, Value>;
+/** A table decodes to an array: of values when elementary, of records when a group. */
+export type DecodedValue = Value | DecodedRecord | DecodedValue[];
+
+export type DecodedRecord = { [key: string]: DecodedValue };
 
 function text(buf: Uint8Array, enc: Encoding): string {
   if (enc === 'cp037') return decodeEbcdic(buf);
@@ -133,15 +136,26 @@ function binary(buf: Uint8Array, item: Item): string {
   return `${neg ? '-' : ''}${abs.slice(0, cut)}.${abs.slice(cut)}`;
 }
 
-/** Decodes a single elementary field out of a record buffer. */
-export function decodeField(buf: Uint8Array, item: Item, options: DecodeOptions): Value {
+/**
+ * Decodes a single elementary field out of a record buffer.
+ *
+ * @param at byte offset to read from. Defaults to `item.offset`, which is the
+ *   right answer only for a layout that is not variable; inside a table, and
+ *   after one, the caller knows the real position and passes it.
+ */
+export function decodeField(
+  buf: Uint8Array,
+  item: Item,
+  options: DecodeOptions,
+  at: number = item.offset,
+): Value {
   const field = item.field;
   if (!field) throw new DecodeError(`${item.name} is not an elementary field`);
 
-  const slice = buf.subarray(item.offset, item.offset + item.size);
+  const slice = buf.subarray(at, at + item.size);
   if (slice.length !== item.size) {
     throw new DecodeError(
-      `${item.name}: expected ${item.size} bytes at offset ${item.offset}, ` +
+      `${item.name}: expected ${item.size} bytes at offset ${at}, ` +
         `only ${slice.length} available: truncated record`,
     );
   }
@@ -166,22 +180,142 @@ export function decodeField(buf: Uint8Array, item: Item, options: DecodeOptions)
   }
 }
 
+export interface ScopeEntry {
+  /** Key this entry takes in the decoded record. */
+  readonly key: string;
+  /** Path from the scope root, which becomes the key when the name collides. */
+  readonly path: string;
+  readonly item: Item;
+}
+
 /**
- * The key each field takes in a decoded record: short name when unique, full
- * path when it collides. Copybooks reuse the same name across different
- * branches often enough to matter.
+ * What one level of a decoded record contains: its elementary fields and its
+ * tables, in physical order.
  *
- * Exported because the type generator has to produce exactly these keys. A
- * second copy of the rule would drift, and the symptom would be a type that
- * names a property the decoder never sets.
+ * A table stops the descent, because it becomes an array of its own and its
+ * children are named inside each element rather than in this scope. Groups that
+ * are not tables are flattened away, which is what keeps a plain record flat.
+ *
+ * The key is the short name when unique in the scope and the path when it
+ * collides, because copybooks reuse the same name across branches often enough
+ * to matter. The type generator calls this too: a second copy of the rule would
+ * drift, and the symptom would be a type naming a property nobody sets.
+ *
+ * @param prefix path already consumed. Defaults to the scope's own name, which
+ *   is what the record root wants; a table element passes `''` because its
+ *   fields are named relative to the element.
  */
-// ponytail: quadratic in field count, fine for the hundreds of fields a
-// copybook holds. Group by name if a record ever has thousands.
-export function fieldKeys(layout: Layout): Array<{ key: string; item: Item }> {
-  return layout.fields.map(({ path, item }) => ({
-    key: layout.fields.filter((f) => f.item.name === item.name).length === 1 ? item.name : path,
+// ponytail: quadratic in entries per scope, fine for the dozens a level holds.
+export function scopeEntries(scope: Item, prefix: string = scope.name): ScopeEntry[] {
+  const found: Array<{ path: string; item: Item }> = [];
+
+  const walk = (item: Item, at: string) => {
+    for (const child of item.children) {
+      const path = at ? `${at}.${child.name}` : child.name;
+      if (child.occurs || child.children.length === 0) found.push({ path, item: child });
+      else walk(child, path);
+    }
+  };
+  walk(scope, prefix);
+
+  return found.map(({ path, item }) => ({
+    key: found.filter((f) => f.item.name === item.name).length === 1 ? item.name : path,
+    path,
     item,
   }));
+}
+
+/** The keys of the record's top level. Kept as the name callers already know. */
+export function fieldKeys(layout: Layout): Array<{ key: string; item: Item }> {
+  return scopeEntries(layout.root);
+}
+
+/**
+ * Values decoded so far at one level, by field name, so that a
+ * `DEPENDING ON` can find its counter.
+ *
+ * Lookup climbs outward: a nested table may be sized by a field of the record
+ * root. It never descends, because a count declared inside the table it sizes
+ * is a copybook error, and `parseCopybook` already refuses it.
+ */
+interface Frame {
+  readonly byName: Map<string, Value>;
+}
+
+function resolveCount(item: Item, frames: Frame[]): number {
+  const occurs = item.occurs!;
+  if (!occurs.dependingOn) return occurs.max;
+
+  for (const frame of frames) {
+    const raw = frame.byName.get(occurs.dependingOn);
+    if (raw === undefined) continue;
+    if (raw === null) {
+      throw new DecodeError(`${item.name}: ${occurs.dependingOn} decoded to null, so the count is unknown`);
+    }
+    const count = Number(raw);
+    if (!Number.isInteger(count)) {
+      throw new DecodeError(`${item.name}: ${occurs.dependingOn} is "${raw}", which is not a whole count`);
+    }
+    if (count < occurs.min || count > occurs.max) {
+      throw new DecodeError(
+        `${item.name}: ${occurs.dependingOn} says ${count}, outside OCCURS ${occurs.min} TO ${occurs.max}. ` +
+          'Either the record is wrong or the copybook does not match it.',
+      );
+    }
+    return count;
+  }
+
+  throw new DecodeError(
+    `${item.name}: OCCURS DEPENDING ON ${occurs.dependingOn}, which was not decoded before the table`,
+  );
+}
+
+/**
+ * Decodes one level of the record, advancing a cursor.
+ *
+ * The cursor is the whole reason this is a walk and not a set of lookups by
+ * `item.offset`: a table with `DEPENDING ON` changes its own length per record,
+ * so everything after it moves. Precomputed offsets would be right for the
+ * first record and quietly wrong for the next one.
+ */
+function decodeScope(
+  buf: Uint8Array,
+  scope: Item,
+  prefix: string,
+  from: number,
+  options: DecodeOptions,
+  outer: Frame[],
+): { record: DecodedRecord; cursor: number } {
+  const record: DecodedRecord = {};
+  const frame: Frame = { byName: new Map() };
+  const frames = [frame, ...outer];
+  let cursor = from;
+
+  for (const { key, item } of scopeEntries(scope, prefix)) {
+    if (!item.occurs) {
+      const value = decodeField(buf, item, options, cursor);
+      record[key] = value;
+      frame.byName.set(item.name, value);
+      cursor += item.size;
+      continue;
+    }
+
+    const count = resolveCount(item, frames);
+    const values: DecodedValue[] = [];
+    for (let i = 0; i < count; i += 1) {
+      if (item.children.length === 0) {
+        values.push(decodeField(buf, item, options, cursor));
+        cursor += item.size;
+      } else {
+        const element = decodeScope(buf, item, '', cursor, options, frames);
+        values.push(element.record);
+        cursor = element.cursor;
+      }
+    }
+    record[key] = values;
+  }
+
+  return { record, cursor };
 }
 
 /**
@@ -194,39 +328,86 @@ export function decodeRecord(
   layout: Layout,
   options: DecodeOptions,
 ): DecodedRecord {
+  return readRecord(buf, layout, options).record;
+}
+
+/** Same as `decodeRecord`, plus how many bytes the record actually took. */
+function readRecord(
+  buf: Uint8Array,
+  layout: Layout,
+  options: DecodeOptions,
+): { record: DecodedRecord; cursor: number } {
   const body = options.rdw ? buf.subarray(4) : buf;
-  if (body.length < layout.size) {
+
+  // A fixed layout knows its length up front, so check it before reading a
+  // single field: the error then names the layout instead of a field. A variable
+  // layout cannot, and a truncated one surfaces at the field that runs out.
+  if (!layout.variable && body.length < layout.size) {
     throw new DecodeError(
       `record is ${body.length} bytes, layout ${layout.name} requires ${layout.size}`,
     );
   }
 
-  const out: DecodedRecord = {};
-  for (const { key, item } of fieldKeys(layout)) {
-    out[key] = decodeField(body, item, options);
-  }
-  return out;
+  return decodeScope(body, layout.root, layout.root.name, 0, options, []);
 }
 
 /**
- * Splits a fixed-length record file and decodes each record.
+ * Splits a record file and decodes each record.
  *
- * The division is the cheapest wrong-layout check that exists: if the file is
- * not a multiple of the record size, the copybook does not match the data.
+ * Three ways to find where a record ends, in order of how much they can
+ * validate:
+ *
+ * 1. A Record Descriptor Word carries the length, so it is read and trusted.
+ * 2. A fixed layout divides the file. That division is the cheapest
+ *    wrong-layout check there is: a remainder means the copybook does not match
+ *    the data, caught before looking at a single value.
+ * 3. A variable layout without an RDW has to be walked, resolving each
+ *    `DEPENDING ON` to learn the length of the record in hand. Nothing
+ *    validates the total, so a wrong copybook shows up as a field error
+ *    somewhere in the middle instead of a clean failure up front.
  */
 export function* decodeFile(
   buf: Uint8Array,
   layout: Layout,
   options: DecodeOptions,
 ): Generator<DecodedRecord> {
-  const step = layout.size + (options.rdw ? 4 : 0);
-  if (buf.length % step !== 0) {
-    throw new DecodeError(
-      `file is ${buf.length} bytes, which is not a multiple of ${step}. ` +
-        'Either the copybook does not match the data, or the RDW is unhandled.',
-    );
+  if (options.rdw) {
+    let at = 0;
+    while (at < buf.length) {
+      if (at + 4 > buf.length) {
+        throw new DecodeError(`${buf.length - at} trailing bytes, too few for a Record Descriptor Word`);
+      }
+      // The RDW length counts its own four bytes.
+      const length = (buf[at]! << 8) | buf[at + 1]!;
+      if (length < 4 || at + length > buf.length) {
+        throw new DecodeError(
+          `the RDW at byte ${at} says ${length} bytes, which does not fit the remaining ${buf.length - at}`,
+        );
+      }
+      yield decodeRecord(buf.subarray(at, at + length), layout, options);
+      at += length;
+    }
+    return;
   }
-  for (let i = 0; i < buf.length; i += step) {
-    yield decodeRecord(buf.subarray(i, i + step), layout, options);
+
+  if (!layout.variable) {
+    if (buf.length % layout.size !== 0) {
+      throw new DecodeError(
+        `file is ${buf.length} bytes, which is not a multiple of ${layout.size}. ` +
+          'Either the copybook does not match the data, or the RDW is unhandled.',
+      );
+    }
+    for (let at = 0; at < buf.length; at += layout.size) {
+      yield decodeRecord(buf.subarray(at, at + layout.size), layout, options);
+    }
+    return;
+  }
+
+  let at = 0;
+  while (at < buf.length) {
+    const { record, cursor } = readRecord(buf.subarray(at), layout, options);
+    if (cursor === 0) throw new DecodeError(`layout ${layout.name} consumed no bytes, so the walk cannot advance`);
+    yield record;
+    at += cursor;
   }
 }

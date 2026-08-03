@@ -69,8 +69,8 @@ test('ignores comments and the fixed-format sequence area', () => {
   assert.equal(l.fields[0]!.item.name, 'A');
 });
 
-test('rejects REDEFINES and OCCURS rather than computing a wrong offset', () => {
-  // Accepting them unimplemented would produce a layout that decodes without
+test('rejects REDEFINES rather than computing a wrong offset', () => {
+  // Accepting it unimplemented would produce a layout that decodes without
   // complaint and returns wrong values. Failing loudly is the correct behaviour.
   assert.throws(
     () =>
@@ -79,13 +79,17 @@ test('rejects REDEFINES and OCCURS rather than computing a wrong offset', () => 
       ),
     CopybookError,
   );
-  assert.throws(
-    () =>
-      parseCopybook(
-        '       01  R.\n           05  N PIC 9(2).\n           05  I OCCURS 1 TO 5 DEPENDING ON N PIC X.\n',
-      ),
-    CopybookError,
+});
+
+test('OCCURS on one line, with the PIC after the clause, is a table of that PIC', () => {
+  const l = parseCopybook(
+    '       01  R.\n           05  N PIC 9(2).\n           05  I OCCURS 1 TO 5 DEPENDING ON N PIC X.\n',
   );
+  const table = l.fields.find((f) => f.item.name === 'I')!.item;
+  assert.deepEqual(table.occurs, { min: 1, max: 5, dependingOn: 'N' });
+  assert.equal(table.size, 1, 'one occurrence');
+  assert.equal(l.size, 7, 'two for N plus five occurrences at most');
+  assert.equal(l.variable, true);
 });
 
 test('rejects a malformed copybook', () => {

@@ -1,6 +1,6 @@
 {
   "name": "copybook-ts",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Parse COBOL copybooks and decode mainframe fixed-width records in TypeScript: COMP-3, EBCDIC, implied decimal point and zone sign",
   "type": "module",
   "license": "MIT",
@@ -30,7 +30,7 @@
     "typecheck": "tsc --noEmit",
     "test": "rm -rf dist && tsc && node --test dist/test/*.test.js",
     "ebcdic": "python3 tools/generate-ebcdic.py > src/ebcdic.ts",
-    "codegen:fixture": "npm run build && node dist/src/cli.js test/fixtures/customer.cpy --from ../../src/index.js > test/fixtures/customer.generated.ts",
+    "codegen:fixture": "npm run build && node dist/src/cli.js test/fixtures/customer.cpy --from ../../src/index.js > test/fixtures/customer.generated.ts && node dist/src/cli.js test/fixtures/order.cpy --from ../../src/index.js > test/fixtures/order.generated.ts",
     "prepublishOnly": "npm test"
   },
   "keywords": [

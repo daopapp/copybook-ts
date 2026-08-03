@@ -90,15 +90,59 @@ breaking overnight against a file that just arrived.
 | Levels 66 and 88, which occupy no space | yes |
 | Fixed-format sequence area and comment indicator | yes |
 | EBCDIC code page 037 | yes |
-| Record Descriptor Word (`RECFM=VB`) | yes, via `{ rdw: true }` |
+| Record Descriptor Word (`RECFM=VB`) | yes, via `{ rdw: true }`, one length per record |
+| `OCCURS n TIMES`, elementary and group | yes, decodes to an array |
+| `OCCURS DEPENDING ON`, resolved per record | yes |
+| Tables nested in tables | yes |
 | `REDEFINES` | **refuses with an error** |
-| `OCCURS` and `OCCURS DEPENDING ON` | **refuses with an error** |
 | EBCDIC code pages other than 037 | no |
 
-`REDEFINES` and `OCCURS` **fail loudly on purpose**. Both change how offsets are
-computed. Accepting them unimplemented would produce a layout that decodes
-without complaint and returns wrong values, which is the worst possible outcome
-for a library like this one.
+`REDEFINES` **fails loudly on purpose**. It is a union over the same memory and
+requires choosing an interpretation the copybook does not record. Accepting it
+unimplemented would produce a layout that decodes without complaint and returns
+wrong values, which is the worst possible outcome for a library like this one.
+
+## Tables
+
+A table decodes to an array. An elementary `OCCURS` gives an array of values, a
+group `OCCURS` an array of records:
+
+```
+       01  ORDER-RECORD.
+           05  ORDER-ID    PIC 9(5).
+           05  LINE-COUNT  PIC 9(2).
+           05  LINES OCCURS 1 TO 3 TIMES DEPENDING ON LINE-COUNT.
+               10  ITEM-CODE PIC X(3).
+               10  QTY       PIC S9(3) COMP-3.
+           05  TOTAL       PIC S9(5)V99 COMP-3.
+```
+
+```ts
+{
+  'ORDER-ID': '42',
+  'LINE-COUNT': '2',
+  LINES: [
+    { 'ITEM-CODE': 'ABC', QTY: '10' },
+    { 'ITEM-CODE': 'DEF', QTY: '-5' },
+  ],
+  TOTAL: '55.25',
+}
+```
+
+With `DEPENDING ON` the record length varies, so `layout.variable` is true and
+`layout.size` is the **maximum**. The decoder walks the layout with a cursor
+instead of reading precomputed offsets: `TOTAL` above sits five bytes later when
+a third line arrives, and an offset computed once would be right for the first
+record and quietly wrong for the next.
+
+That also decides how a file is split. With an RDW the length comes from each
+record. Without one, a fixed layout divides the file, which is the cheapest
+wrong-layout check available, and a variable layout has to be walked record by
+record, resolving each count to learn where the next record starts.
+
+A count outside the declared `OCCURS` range is an error, not a clamp. So is a
+`DEPENDING ON` field declared after the table it sizes, or inside it, which
+`parseCopybook` refuses before any data is read.
 
 ## Decisions worth explaining
 
@@ -117,9 +161,10 @@ nibble of the byte, which holds identically in EBCDIC (`0xF1`) and ASCII
 bug: `0xD3`, which is digit 3 carrying a negative sign, becomes the letter `L`.
 There is a test that pins exactly this.
 
-**Dividing the file is the cheapest validation available.** If the file is not a
-multiple of the record size, the copybook does not match the data, and that is
-caught before looking at a single value.
+**Dividing the file is the cheapest validation available.** If a fixed-length
+file is not a multiple of the record size, the copybook does not match the data,
+and that is caught before looking at a single value. A variable layout gives up
+that check, which is a reason to prefer an RDW when the file has one.
 
 **The EBCDIC table is generated, not transcribed.** `src/ebcdic.ts` comes from
 Python's `cp037` codec, with self-checks on the points that matter (`0xF0` is
@@ -136,13 +181,15 @@ by hand shows up as a failure rather than as silently wrong data.
 ## Development
 
 ```
-npm test          # compiles and runs 38 tests on Node's built-in runner
+npm test          # compiles and runs 53 tests on Node's built-in runner
 npm run typecheck
 ```
 
-`test/fixtures/customer.generated.ts` is committed generated output. A test
-regenerates it and diffs, so a change in the generator that nobody meant shows
-up as a failure. Regenerate with `npm run codegen:fixture`.
+`test/fixtures/customer.generated.ts` and `order.generated.ts` are committed
+generated output, one fixed layout and one variable. Tests regenerate both and
+diff, so a change in the generator that nobody meant shows up as a failure, and
+`tsc` compiles them along with the suite, so generated code that does not build
+fails the build. Regenerate with `npm run codegen:fixture`.
 
 No test framework: `node:test` and `node:assert` are enough, and one fewer
 dependency in a library is one fewer dependency for everyone consuming it.
@@ -151,10 +198,9 @@ dependency in a library is one fewer dependency for everyone consuming it.
 
 In order of usefulness, not of ease:
 
-1. `OCCURS` and `OCCURS DEPENDING ON`, with the layout resolved per record
-2. `REDEFINES`, exposing the alternative views instead of picking one
-3. EBCDIC code pages 1047, 273 and 500
-4. Streaming reads, for files that do not fit in memory
+1. `REDEFINES`, exposing the alternative views instead of picking one
+2. EBCDIC code pages 1047, 273 and 500
+3. Streaming reads, for files that do not fit in memory
 
 ## Licence
 
