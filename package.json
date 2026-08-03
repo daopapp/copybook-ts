@@ -11,7 +11,7 @@
     }
   },
   "bin": {
-    "copybook-types": "./dist/src/cli.js"
+    "copybook-types": "dist/src/cli.js"
   },
   "files": [
     "dist/src"
